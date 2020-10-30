@@ -19,22 +19,19 @@
 # THE SOFTWARE.
 import click
 
-from .envision import envision_cli
-from .service import service_cli
-from .studio import scenario_cli
-from .zoo import zoo_cli
+from smarts.service.server import run
 
 
-@click.group()
-def scl():
+@click.group(name="service")
+def service_cli():
     pass
 
 
-scl.add_command(envision_cli)
-scl.add_command(scenario_cli)
-scl.add_command(service_cli)
-scl.add_command(zoo_cli)
+@service_cli.command(name="start")
+@click.option("-p", "--port", default=8888)
+@click.option("--sumo-port", default=8001)
+def start_server(port, sumo_port):
+    run(port, sumo_port)
 
 
-if __name__ == "__main__":
-    scl()
+service_cli.add_command(start_server)
