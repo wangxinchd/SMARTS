@@ -34,32 +34,25 @@ def send_request(end_point, payload=None, port=service_port):
 
 
 def loop(times=3, with_ext_client=False):
+    setup()
     if not with_ext_client:
         while times > 0:
             reset()
-            time.sleep(3)
-            start()
-            time.sleep(10)
-            stop()
-            time.sleep(3)
-            times -= 1
-    else:
-        while times > 0:
-            t = threading.Thread(target=connect, args=(sumo_port, 2,))
-            t.start()
-            reset()
-            t.join()
             time.sleep(1)
             start()
-            test_client_connection(client, "Ext client")
-            time.sleep(2)
+            time.sleep(3)
             stop()
+            time.sleep(1)
             times -= 1
+
+
+def setup():
+    payload = {"scenario": "scenarios/kyber"}
+    send_request("setup", payload=payload)
 
 
 def reset():
-    payload = {"scenario": "scenarios/loop", "agent": "laner"}
-    send_request("setup", payload=payload)
+    send_request("reset")
 
 
 def start():

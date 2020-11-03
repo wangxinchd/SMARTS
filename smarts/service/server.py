@@ -12,56 +12,29 @@ from smarts.core.sumo_traffic_simulation import SumoTrafficSimulation
 from smarts.service.agents.laner import agent_specs as laner_agent_specs
 
 
-@dataclass
-class Agents:
-    name: str
-    agent_specs: Dict[str, AgentSpec]
-
-    def __post_init__(self):
-        self.agents = {
-            agent_id: agent_spec.build_agent()
-            for agent_id, agent_spec in self.agent_specs.items()
-        }
-
-
-AgentOptions = {"laner": Agents("laner", agent_specs=laner_agent_specs)}
-
-
 class SmartsManager:
     def __init__(self):
         self.timestep_sec = 0.1
         self.sumo_port = 8001
-        self._current_agent = Agents(name="", agent_specs={})
         self._smarts = None
 
-    def setup(self, scenario, agent):
+    def setup(self, scenario):
         if self._smarts is None:
-            self.init_smarts(agent)
+            self.init_smarts()
 
-        if self._current_agent.name != agent:
-            self.reset_agent(agent)
+        scenarios_iterator = Scenario.scenario_variations([scenario], [],)
+        self._scenarios_iterator = scenarios_iterator
 
-        scenarios_iterator = Scenario.scenario_variations(
-            [scenario], list(self._current_agent.agent_specs.keys()),
-        )
-
-        scenario = next(scenarios_iterator)
+        scenario = next(self._scenarios_iterator)
         self._smarts.reset(scenario)
 
-    def reset_agent(self, agent):
-        # TODO: hard-coded for now, choose a agent
-        self._current_agent = AgentOptions["laner"]
+    def reset(self):
+        scenario = next(self._scenarios_iterator)
+        self._smarts.reset(scenario)
 
-    def init_smarts(self, agent):
-        self.reset_agent(agent)
-
-        agent_interfaces = {
-            agent_id: agent.interface
-            for agent_id, agent in self._current_agent.agent_specs.items()
-        }
-
+    def init_smarts(self):
         self._smarts = SMARTS(
-            agent_interfaces=agent_interfaces,
+            agent_interfaces={},
             traffic_sim=SumoTrafficSimulation(
                 headless=False,
                 time_resolution=self.timestep_sec,
@@ -75,13 +48,8 @@ class SmartsManager:
 
     def start(self):
         def start_stepping():
-            observations = {}
             while not self._has_stopped:
-                actions = {
-                    agent_id: self._current_agent.agents[agent_id].act(agent_obs)
-                    for agent_id, agent_obs in observations.items()
-                }
-                observations, _, _, _ = self._smarts.step(actions)
+                self._smarts.step({})
 
         self._has_stopped = False
         t = threading.Thread(target=start_stepping)
@@ -98,12 +66,17 @@ class SmartsManager:
 manager = SmartsManager()
 
 
-class ResetHandler(tornado.web.RequestHandler):
+class SetupHandler(tornado.web.RequestHandler):
     def get(self):
         scenario = self.get_argument("scenario")
-        agent = self.get_argument("agent")
-        manager.setup(scenario, agent)
-        self.write(f"Scenario reset to {scenario.name}")
+        manager.setup(scenario)
+        self.write(f"Scenario setup to {scenario}")
+
+
+class ResetHandler(tornado.web.RequestHandler):
+    def get(self):
+        manager.reset()
+        self.write(f"Scenario reset.")
 
 
 class StartHandler(tornado.web.RequestHandler):
@@ -120,7 +93,12 @@ class StopHandler(tornado.web.RequestHandler):
 
 def make_app():
     return tornado.web.Application(
-        [(r"/setup", ResetHandler), (r"/start", StartHandler), (r"/stop", StopHandler),]
+        [
+            (r"/setup", SetupHandler),
+            (r"/reset", ResetHandler),
+            (r"/start", StartHandler),
+            (r"/stop", StopHandler),
+        ]
     )
 
 
