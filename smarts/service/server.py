@@ -5,11 +5,9 @@ from typing import Dict
 import tornado.ioloop
 import tornado.web
 
-from smarts.core.agent import AgentSpec
 from smarts.core.scenario import Scenario
 from smarts.core.smarts import SMARTS
 from smarts.core.sumo_traffic_simulation import SumoTrafficSimulation
-from smarts.service.agents.laner import agent_specs as laner_agent_specs
 
 
 class SmartsManager:

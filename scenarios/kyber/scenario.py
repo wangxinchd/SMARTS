@@ -21,7 +21,7 @@ open_agent = t.SocialAgentActor(
 )
 
 social_agent_missions = {
-    "all": (
+    "agent-group-1": (
         [
             laner_agent,
             non_interactive_agent,
@@ -30,12 +30,21 @@ social_agent_missions = {
         [
             t.Mission(route=t.RandomRoute()),
         ]
-    )
+    ),
+    # "agent-group-2": (
+    #     [
+    #         laner_agent,
+    #         non_interactive_agent,
+    #         open_agent
+    #     ],
+    #     [
+    #         t.Mission(route=t.RandomRoute()),
+    #     ]
+    # ),
 }
 
 gen_scenario(
     t.Scenario(
-        # TODO: add predefined vehicle types
         social_agent_missions=social_agent_missions,
     ),
     output_dir=Path(__file__).parent,
