@@ -31,7 +31,7 @@ def main(times=3, with_ext_client=False):
 
 
 def setup():
-    payload = {"scenario": "scenarios/kyber"}
+    payload = {"scenario": "scenarios/kyber", "agents": "laner,open"}
     send_request("setup", payload=payload)
 
 

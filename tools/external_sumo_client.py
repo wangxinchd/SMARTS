@@ -8,7 +8,6 @@ def connect(port, order=None):
     return traci_conn
 
 
-
 if __name__ == "__main__":
     cli = connect(8001, order=2)
     while True:

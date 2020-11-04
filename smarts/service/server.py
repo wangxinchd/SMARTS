@@ -1,4 +1,8 @@
+import pickle
+import subprocess
+import tempfile
 import threading
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict
 
@@ -8,6 +12,46 @@ import tornado.web
 from smarts.core.scenario import Scenario
 from smarts.core.smarts import SMARTS
 from smarts.core.sumo_traffic_simulation import SumoTrafficSimulation
+from smarts.sstudio.types import SocialAgentActor
+
+laner_agent = SocialAgentActor(
+    name="keep-lane-agent", agent_locator="zoo.policies:keep-lane-agent-v0",
+)
+
+non_interactive_agent = SocialAgentActor(
+    name=f"non-interactive-agent",
+    agent_locator="zoo.policies:non-interactive-agent-v0",
+    policy_kwargs={"speed": 10},
+)
+
+open_agent = SocialAgentActor(
+    name="open-agent", agent_locator="zoo.policies.open-agent.open_agent:open_agent-v0"
+)
+
+
+AGENTS = {
+    "laner": laner_agent,
+    "npc": non_interactive_agent,
+    "open": open_agent,
+}
+
+
+def build_scenario(actors, scenario_path):
+    with tempfile.NamedTemporaryFile(mode="wb") as f:
+        pickle.dump(actors, f)
+        f.flush()
+        agent_path = Path(f.name).absolute()
+
+        try:
+            subprocess.run(
+                [f"SOCIAL_AGENT_PATH={agent_path} scl scenario build {scenario_path}"],
+                shell=True,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception as e:
+            print(e)
 
 
 class SmartsManager:
@@ -16,11 +60,17 @@ class SmartsManager:
         self.sumo_port = 8001
         self._smarts = None
 
-    def setup(self, scenario):
+    def setup(self, scenario, agents):
         if self._smarts is None:
             self.init_smarts()
 
-        scenarios_iterator = Scenario.scenario_variations([scenario], [],)
+        actors = []
+        for agent in agents:
+            actors.append(AGENTS[agent])
+
+        build_scenario(actors, scenario)
+
+        scenarios_iterator = Scenario.scenario_variations([scenario], [])
         self._scenarios_iterator = scenarios_iterator
 
         scenario = next(self._scenarios_iterator)
@@ -67,7 +117,8 @@ manager = SmartsManager()
 class SetupHandler(tornado.web.RequestHandler):
     def get(self):
         scenario = self.get_argument("scenario")
-        manager.setup(scenario)
+        agents = self.get_argument("agents", "").split(",")
+        manager.setup(scenario, agents)
         self.write(f"Scenario setup to {scenario}")
 
 
