@@ -281,10 +281,9 @@ class SMARTS(ShowBase):
         # Visualization
         self._try_emit_visdom_obs(observations)
 
-        # if len(self._agent_manager.ego_agent_ids):
-        #     while len(observations_for_ego) < 1:
-        #         print("steping")
-        #         observations_for_ego, _, _, _ = self.step({})
+        if len(self._agent_manager.ego_agent_ids):
+            while len(observations_for_ego) < 1:
+                observations_for_ego, _, _, _ = self.step({})
 
         self._reset_providers()
 

@@ -33,17 +33,16 @@ def send_request(end_point, payload=None, port=service_port):
     requests.get(f"http://localhost:{port}/{end_point}", params=payload)
 
 
-def loop(times=3, with_ext_client=False):
+def main(times=3, with_ext_client=False):
     setup()
-    if not with_ext_client:
-        while times > 0:
-            reset()
-            time.sleep(1)
-            start()
-            time.sleep(3)
-            stop()
-            time.sleep(1)
-            times -= 1
+    while times > 0:
+        time.sleep(1)
+        start()
+        time.sleep(3)
+        stop()
+        time.sleep(1)
+        reset()
+        times -= 1
 
 
 def setup():
@@ -64,4 +63,4 @@ def stop():
 
 
 if __name__ == "__main__":
-    loop(3)
+    main(times=3)
