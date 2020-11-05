@@ -1,3 +1,4 @@
+import logging
 import pickle
 import subprocess
 import tempfile
@@ -55,14 +56,39 @@ def build_scenario(actors, scenario_path):
 
 
 class SmartsManager:
-    def __init__(self):
-        self.timestep_sec = 0.1
-        self.sumo_port = 8001
-        self._smarts = None
+    def __init__(
+        self,
+        timestep_sec=0.1,
+        sumo_port=8001,
+        num_external_sumo_clients=0,
+        sumo_headless=False,
+        sumo_auto_start=True,
+    ):
+        self.timestep_sec = timestep_sec
+        self.sumo_port = sumo_port
+        self.num_external_sumo_clients = num_external_sumo_clients
+        self.sumo_headless = sumo_headless
+        self.sumo_auto_start = sumo_auto_start
+        self.init_smarts()
+        self._current_scenario = None
+
+    def init_smarts(self):
+        self._smarts = SMARTS(
+            agent_interfaces={},
+            traffic_sim=SumoTrafficSimulation(
+                headless=self.sumo_headless,
+                time_resolution=self.timestep_sec,
+                num_external_sumo_clients=self.num_external_sumo_clients,
+                sumo_port=self.sumo_port,
+                auto_start=self.sumo_auto_start,
+            ),
+            timestep_sec=self.timestep_sec,
+        )
 
     def setup(self, scenario, agents):
-        if self._smarts is None:
-            self.init_smarts()
+        if self._current_scenario != scenario:
+            logging.warn("warning: SUMO will restart!")
+        self._current_scenario = scenario
 
         actors = []
         for agent in agents:
@@ -80,20 +106,6 @@ class SmartsManager:
         scenario = next(self._scenarios_iterator)
         self._smarts.reset(scenario)
 
-    def init_smarts(self):
-        self._smarts = SMARTS(
-            agent_interfaces={},
-            traffic_sim=SumoTrafficSimulation(
-                headless=False,
-                time_resolution=self.timestep_sec,
-                num_external_sumo_clients=0,
-                sumo_port=self.sumo_port,
-                auto_start=True,
-            ),
-            timestep_sec=self.timestep_sec,
-        )
-        self._has_stopped = False
-
     def start(self):
         def start_stepping():
             while not self._has_stopped:
@@ -109,9 +121,6 @@ class SmartsManager:
     @property
     def smarts(self):
         return self._smarts
-
-
-manager = SmartsManager()
 
 
 class SetupHandler(tornado.web.RequestHandler):
@@ -151,7 +160,10 @@ def make_app():
     )
 
 
-def run(port, sumo_port=8001):
+manager = SmartsManager()
+
+
+def run(port=8888,):
     app = make_app()
     app.listen(port)
     tornado.ioloop.IOLoop.current().start()
