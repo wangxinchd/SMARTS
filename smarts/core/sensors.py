@@ -911,6 +911,68 @@ class NeighborhoodVehiclesSensor(Sensor):
         pass
 
 
+class CutInTrajectorySensor(Sensor):
+    def __init__(self, vehicle, sim, mission_planner, radius=20):
+        self._vehicle = vehicle
+        self._sim = sim
+        self._mission_planner = mission_planner
+        self._radius = radius
+
+    @property
+    def radius(self):
+        self._radius
+
+    def __call__(self):
+        neighborhood_vehicles = self._sim.neighborhood_vehicles_around_vehicle(
+            self._vehicle, radius=self._radius
+        )
+        wp_sensor = WaypointsSensor(self._vehicle, self._mission_planner)
+        if not neighborhood_vehicles:
+            return wp_sensor()
+
+        nei_vehicle = neighborhood_vehicles[0]
+        position = self._vehicle.position[:2]
+        lane = self._sim.road_network.nearest_lane(position)
+        target_position = nei_vehicle.pose.position[:2]
+        target_lane = self._sim.road_network.nearest_lane(target_position)
+
+        if lane.getID() != target_lane.getID():
+            nei_wps = self._sim.waypoints.waypoint_paths_on_lane_at(
+                target_position, target_lane.getID(), 60
+            )
+            p0 = self._vehicle.position[:2]
+            p1 = nei_wps[0][len(nei_wps[0]) // 2].pos
+            p2 = target_position[:2]
+            p3 = nei_wps[0][-1].pos
+            p_x, p_y = bezier([p0, p1, p2, p3], 20)
+            trajectory = []
+            prev = position[:2]
+            for i in range(len(p_x)):
+                pos = np.array([p_x[i], p_y[i]])
+                heading = vec_to_radians(pos - prev)
+                prev = pos
+                lane = self._sim.road_network.nearest_lane(pos)
+                lane_id = lane.getID()
+                lane_index = lane_id.split("_")[-1]
+
+                wp = Waypoint(
+                    pos=pos,
+                    heading=heading,
+                    lane_width=3,
+                    speed_limit=50,
+                    lane_id=lane_id,
+                    lane_index=lane_index,
+                )
+                trajectory.append(wp)
+            return [trajectory]
+        else:
+            lane_index = int(target_lane.getID().split("_")[-1])
+            return [wp_sensor()[lane_index]]
+
+    def teardown(self):
+        pass
+
+
 class UTurnTrajectorySensor(Sensor):
     def __init__(self, vehicle, sim, mission_planner):
         self._vehicle = vehicle

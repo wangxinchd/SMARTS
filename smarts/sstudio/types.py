@@ -342,7 +342,14 @@ class UTurn:
 
     @property
     def name(self):
-        return "uturn"
+        return "u_turn"
+
+
+@dataclass(frozen=True)
+class CutIn:
+    @property
+    def name(self):
+        return "cut_in"
 
 
 @dataclass(frozen=True)
@@ -357,7 +364,7 @@ class Mission:
     """
     entry_tactic: EntryTactic = None
     """A specific tactic the mission should employ to start the mission."""
-    task: Tuple[UTurn] = None
+    task: Tuple[UTurn, CutIn] = None
 
 
 @dataclass(frozen=True)
