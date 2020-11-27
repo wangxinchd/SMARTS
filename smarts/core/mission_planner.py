@@ -299,7 +299,7 @@ class MissionPlanner:
             # agent at the start edge
             p0 = pose.position[:2]
             distance = (
-                10 * abs(abs(target_heading - heading) - math.pi / 2) / (math.pi / 2)
+                15 * abs(abs(target_heading - heading) - math.pi / 2) / (math.pi / 2)
             )
             offset = radians_to_vec(heading) * distance
             p1 = np.array([pose.position[0] + offset[0], pose.position[1] + offset[1],])

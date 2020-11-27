@@ -32,4 +32,5 @@ def entrypoint(
     )
 
 
-register(locator="open_agent-v0", entry_point=entrypoint)
+register(locator="open_agent-v0", entry_point=lambda **kwargs: entrypoint(debug=False, **kwargs))
+# register(locator="open_agent-v0", entry_point=entrypoint)
