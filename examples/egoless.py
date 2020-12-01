@@ -15,7 +15,9 @@ def main(scenarios, headless, num_episodes, seed, max_episode_steps=None):
         scenarios=scenarios,
         agent_specs={},
         headless=headless,
-        sumo_headless=True,
+        sumo_headless=False,
+        sumo_auto_start=False,
+        endless_traffic=False,
         visdom=False,
         seed=seed,
         timestep_sec=0.1,
@@ -28,7 +30,7 @@ def main(scenarios, headless, num_episodes, seed, max_episode_steps=None):
         env.reset()
         episode.record_scenario(env.scenario_log)
 
-        for _ in range(max_episode_steps):
+        for _ in range(230):
             env.step({})
             episode.record_step({}, {}, {}, {})
 
