@@ -49,12 +49,12 @@ social_agent_missions = {
             t.SocialAgentActor(
                 name="open-agent-aggressive",
                 agent_locator="open_agent:open_agent-v0",
-                policy_kwargs={"gains": aggressive_config}
+                policy_kwargs={"gains": aggressive_config},
             ),
             t.SocialAgentActor(
                 name="open-agent-stable",
                 agent_locator="open_agent:open_agent-v0",
-                policy_kwargs={"gains": stable_config}
+                policy_kwargs={"gains": stable_config},
             ),
         ],
         [

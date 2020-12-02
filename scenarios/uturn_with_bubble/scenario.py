@@ -8,7 +8,9 @@ from smarts.sstudio import types as t
 traffic = t.Traffic(
     flows=[
         t.Flow(
-            route=t.Route(begin=("edge-west-WE", 0, 10), end=("edge-west-WE", 0, "max")),
+            route=t.Route(
+                begin=("edge-west-WE", 0, 10), end=("edge-west-WE", 0, "max")
+            ),
             rate=1,
             actors={t.TrafficActor(name="car"): 1.0},
             # begin=0,
@@ -49,14 +51,14 @@ npc_actor = t.SocialAgentActor(
 aggressive_open_actor = t.SocialAgentActor(
     name="open-agent-aggressive",
     agent_locator="open_agent:open_agent-v0",
-    policy_kwargs={"gains": aggressive_config}
+    policy_kwargs={"gains": aggressive_config},
 )
 
 
 stable_open_actor = t.SocialAgentActor(
     name="open-agent-stable",
     agent_locator="open_agent:open_agent-v0",
-    policy_kwargs={"gains": stable_config}
+    policy_kwargs={"gains": stable_config},
 )
 
 social_agent_missions = {
@@ -66,7 +68,7 @@ social_agent_missions = {
             t.Mission(
                 t.Route(begin=("edge-west-EW", 0, 0), end=("edge-west-EW", 0, "max")),
             )
-        ]
+        ],
     )
 }
 
@@ -87,9 +89,7 @@ gen_scenario(
                 zone=t.PositionalZone(pos=(50, 0), size=(10, 15)),
                 margin=5,
                 actor=stable_open_actor,
-                follow_actor_id=t.Bubble.to_actor_id(
-                    npc_actor, mission_group="all"
-                ),
+                follow_actor_id=t.Bubble.to_actor_id(npc_actor, mission_group="all"),
                 follow_offset=(-7, 10),
             ),
         ],
