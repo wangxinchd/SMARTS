@@ -30,7 +30,7 @@ def main(scenarios, headless, num_episodes, seed, max_episode_steps=None):
         env.reset()
         episode.record_scenario(env.scenario_log)
 
-        for _ in range(230):
+        for _ in range(250):
             env.step({})
             episode.record_step({}, {}, {}, {})
 
