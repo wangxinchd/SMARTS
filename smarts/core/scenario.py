@@ -181,6 +181,7 @@ class Scenario:
         social_agents: Dict[str, SocialAgent] = None,
         log_dir: str = None,
         surface_patches: list = None,
+        traffic_history: dict = {},
     ):
 
         self._logger = logging.getLogger(self.__class__.__name__)
@@ -197,6 +198,7 @@ class Scenario:
         self._net_file_hash = file_md5_hash(self.net_filepath)
         self._waypoints = Waypoints(self._road_network, spacing=1.0)
         self._scenario_hash = path2hash(str(Path(self.root_filepath).resolve()))
+        self._traffic_history = traffic_history or {}
 
     def __repr__(self):
         return f"""Scenario(
@@ -297,7 +299,7 @@ class Scenario:
                     ).items()
                 }
 
-                yield Scenario(
+                scenario = Scenario(
                     scenario_root,
                     route=concrete_route,
                     missions={
@@ -307,6 +309,13 @@ class Scenario:
                     social_agents=concrete_social_agents,
                     surface_patches=surface_patches,
                 )
+
+                # makes sure loop runs at least once
+                traffic_histories = scenario.discover_traffic_histories() or [{}]
+
+                for traffic_history in traffic_histories:
+                    scenario.set_traffic_history(traffic_history)
+                    yield scenario
 
     @staticmethod
     def discover_agent_missions_count(scenario_root):
@@ -788,6 +797,13 @@ class Scenario:
         assert Scenario.is_valid_scenario(self._root)
 
         os.makedirs(self._log_dir, exist_ok=True)
+
+    def set_traffic_history(self, traffic_history):
+        self._traffic_history = traffic_history
+
+    @property
+    def traffic_history(self):
+        return self._traffic_history
 
     @property
     def scenario_hash(self):
