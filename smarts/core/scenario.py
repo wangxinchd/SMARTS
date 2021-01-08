@@ -181,7 +181,7 @@ class Scenario:
         social_agents: Dict[str, SocialAgent] = None,
         log_dir: str = None,
         surface_patches: list = None,
-        traffic_history: dict = {},
+        traffic_history: dict = None,
     ):
 
         self._logger = logging.getLogger(self.__class__.__name__)
@@ -265,24 +265,29 @@ class Scenario:
             routes = Scenario.discover_routes(scenario_root) or [None]
             agent_missions = agent_missions or [None]
             social_agents = social_agents or [None]
+            traffic_histories = Scenario.discover_traffic_histories(scenario_root) or [{}]
 
             roll_routes = 0
             roll_agent_missions = 0
             roll_social_agents = 0
+            roll_traffic_histories = 0
 
             if shuffle_scenarios:
                 roll_routes = random.randint(0, len(routes))
                 roll_agent_missions = random.randint(0, len(agent_missions))
                 roll_social_agents = random.randint(0, len(social_agents))
+                roll_traffic_histories = random.randint(0, len(traffic_histories))
 
             for (
                 concrete_route,
                 concrete_agent_missions,
                 concrete_social_agents,
+                conrete_traffic_history,
             ) in product(
                 np.roll(routes, roll_routes, 0),
                 np.roll(agent_missions, roll_agent_missions, 0),
                 np.roll(social_agents, roll_social_agents, 0),
+                np.roll(traffic_histories, roll_traffic_histories, 0)
             ):
                 concrete_social_agent_missions = {
                     agent_id: mission
@@ -299,7 +304,7 @@ class Scenario:
                     ).items()
                 }
 
-                scenario = Scenario(
+                yield Scenario(
                     scenario_root,
                     route=concrete_route,
                     missions={
@@ -308,14 +313,8 @@ class Scenario:
                     },
                     social_agents=concrete_social_agents,
                     surface_patches=surface_patches,
+                    traffic_history=conrete_traffic_history,
                 )
-
-                # makes sure loop runs at least once
-                traffic_histories = scenario.discover_traffic_histories() or [{}]
-
-                for traffic_history in traffic_histories:
-                    scenario.set_traffic_history(traffic_history)
-                    yield scenario
 
     @staticmethod
     def discover_agent_missions_count(scenario_root):
@@ -514,7 +513,7 @@ class Scenario:
         self._missions.update(ego_mission)
 
     def discover_missions_of_traffic_histories(self):
-        current_traffic_history = self.discover_traffic_histories()[0] or {}
+        current_traffic_history = Scenario.discover_traffic_histories(self.root_filepath)[0] or {}
 
         vehicle_missions = {}
         # sort by timestamp
@@ -535,8 +534,9 @@ class Scenario:
 
         return vehicle_missions
 
-    def discover_traffic_histories(self):
-        path = os.path.join(self._root, "traffic_histories.pkl")
+    @staticmethod
+    def discover_traffic_histories(scenario_root):
+        path = os.path.join(scenario_root, "traffic_histories.pkl")
         if not os.path.exists(path):
             return []
 
@@ -544,7 +544,7 @@ class Scenario:
         with open(path, "rb") as f:
             files = pickle.load(f)
             for file_name in files:
-                with open(os.path.join(self._root, file_name), "r") as history_file:
+                with open(os.path.join(scenario_root, file_name), "r") as history_file:
                     traffic_histories.append(json.loads(history_file.read()))
 
         return traffic_histories
@@ -798,12 +798,13 @@ class Scenario:
 
         os.makedirs(self._log_dir, exist_ok=True)
 
-    def set_traffic_history(self, traffic_history):
-        self._traffic_history = traffic_history
-
     @property
     def traffic_history(self):
         return self._traffic_history
+
+    @traffic_history.setter
+    def traffic_history(self, traffic_history):
+        self._traffic_history = traffic_history
 
     @property
     def scenario_hash(self):
