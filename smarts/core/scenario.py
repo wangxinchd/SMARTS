@@ -266,7 +266,7 @@ class Scenario:
             agent_missions = agent_missions or [None]
             social_agents = social_agents or [None]
             traffic_histories = Scenario.discover_traffic_histories(scenario_root) or [
-                {}
+                None
             ]
 
             roll_routes = 0
