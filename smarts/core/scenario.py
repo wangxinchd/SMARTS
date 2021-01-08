@@ -515,14 +515,10 @@ class Scenario:
         self._missions.update(ego_mission)
 
     def discover_missions_of_traffic_histories(self):
-        current_traffic_history = (
-            Scenario.discover_traffic_histories(self.root_filepath)[0] or {}
-        )
-
         vehicle_missions = {}
         # sort by timestamp
         sorted_history = sorted(
-            current_traffic_history.items(), key=lambda d: float(d[0])
+            scenario.traffic_history.items(), key=lambda d: float(d[0])
         )
         for t, vehicle_states in sorted_history:
             for vehicle_id in vehicle_states:
