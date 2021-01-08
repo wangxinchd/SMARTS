@@ -60,15 +60,6 @@ def scenario_parent_path():
 
 @pytest.fixture
 def create_scenario(scenario_parent_path):
-    # scenario = Path(scenario_parent_path) / "cycles"
-    # scenario.mkdir()
-
-    # shutil.copyfile(
-    #     Path(__file__).parent / "maps/6lane.net.xml", scenario / "map.net.xml"
-    # )
-    # generate_glb_from_sumo_network(
-    #     str(scenario / "map.net.xml"), str(scenario / "map.glb")
-    # )
     with temp_scenario(name="cycles", map="maps/6lane.net.xml") as scenario_root:
         actors = [
             SocialAgentActor(
