@@ -19,28 +19,20 @@ traffic_history_1 = {
         "1": {
             "vehicle_id": "1",
             "vehicle_type": "car",
-            "position": [
-                1068.124,
-                959.455,
-                0
-            ],
+            "position": [1068.124, 959.455, 0],
             "speed": 5.128410474991252,
             "heading": -4.675796326794897,
             "vehicle_length": 4.22,
-            "vehicle_width": 1.72
+            "vehicle_width": 1.72,
         },
         "2": {
             "vehicle_id": "2",
             "vehicle_type": "car",
-            "position": [
-                1041.407,
-                956.583,
-                0
-            ],
+            "position": [1041.407, 956.583, 0],
             "speed": 2.9067860258367832,
             "heading": 1.4512036732051032,
             "vehicle_length": 4.16,
-            "vehicle_width": 1.78
+            "vehicle_width": 1.78,
         },
     }
 }
@@ -50,19 +42,14 @@ traffic_history_2 = {
         "13": {
             "vehicle_id": "13",
             "vehicle_type": "car",
-            "position": [
-                1058.951,
-                950.98,
-                0
-            ],
+            "position": [1058.951, 950.98, 0],
             "speed": 8.8529150566353,
             "heading": 1.5092036732051035,
             "vehicle_length": 4.4,
-            "vehicle_width": 1.92
+            "vehicle_width": 1.92,
         },
     }
 }
-
 
 
 @pytest.fixture
@@ -98,7 +85,9 @@ def create_scenario(scenario_parent_path):
             ("group-3", ("edge-east-EW", "edge-west-EW")),
             ("group-4", ("edge-south-SN", "edge-north-SN")),
         ]:
-            route = Route(begin=("edge-north-NS", 1, 0), end=("edge-south-NS", 1, "max"))
+            route = Route(
+                begin=("edge-north-NS", 1, 0), end=("edge-south-NS", 1, "max")
+            )
             missions = [Mission(route=route)] * 2
             gen_social_agent_missions(
                 scenario_root, social_agent_actor=actors, name=name, missions=missions,
@@ -128,6 +117,9 @@ def test_mutiple_traffic_data(create_scenario):
             assert scenario.traffic_history is traffic_history_2
 
         traffic_history_provider.setup(scenario)
-        assert traffic_history_provider._current_traffic_history == scenario.traffic_history
+        assert (
+            traffic_history_provider._current_traffic_history
+            == scenario.traffic_history
+        )
 
         use_first_history = not use_first_history

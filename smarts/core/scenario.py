@@ -265,7 +265,9 @@ class Scenario:
             routes = Scenario.discover_routes(scenario_root) or [None]
             agent_missions = agent_missions or [None]
             social_agents = social_agents or [None]
-            traffic_histories = Scenario.discover_traffic_histories(scenario_root) or [{}]
+            traffic_histories = Scenario.discover_traffic_histories(scenario_root) or [
+                {}
+            ]
 
             roll_routes = 0
             roll_agent_missions = 0
@@ -287,7 +289,7 @@ class Scenario:
                 np.roll(routes, roll_routes, 0),
                 np.roll(agent_missions, roll_agent_missions, 0),
                 np.roll(social_agents, roll_social_agents, 0),
-                np.roll(traffic_histories, roll_traffic_histories, 0)
+                np.roll(traffic_histories, roll_traffic_histories, 0),
             ):
                 concrete_social_agent_missions = {
                     agent_id: mission
@@ -513,7 +515,9 @@ class Scenario:
         self._missions.update(ego_mission)
 
     def discover_missions_of_traffic_histories(self):
-        current_traffic_history = Scenario.discover_traffic_histories(self.root_filepath)[0] or {}
+        current_traffic_history = (
+            Scenario.discover_traffic_histories(self.root_filepath)[0] or {}
+        )
 
         vehicle_missions = {}
         # sort by timestamp
