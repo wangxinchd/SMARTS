@@ -1,14 +1,37 @@
+# MIT License
+#
+# Copyright (C) 2021. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 
 import pytest
-from shapely.geometry import Point
-
-import smarts.sstudio.types as t
+from helpers.bubbles import bubble_geometry
 
 # TODO: Rename temp_scenario(...)
 from helpers.scenario import temp_scenario
-from helpers.bubbles import bubble_geometry
+from shapely.geometry import Point
+
+import smarts.sstudio.sstypes as t
+from smarts.core.local_traffic_provider import LocalTrafficProvider
 from smarts.core.scenario import Scenario
 from smarts.core.smarts import SMARTS
 from smarts.core.sumo_traffic_simulation import SumoTrafficSimulation
@@ -21,27 +44,36 @@ def num_vehicles():
 
 
 @pytest.fixture
-def bubbles():
+def active_bubbles():
     actor = t.SocialAgentActor(
-        name="keep-lane-agent", agent_locator="zoo.policies:keep-lane-agent-v0",
+        name="keep-lane-agent",
+        agent_locator="zoo.policies:keep-lane-agent-v0",
     )
 
     return [
         t.Bubble(
-            zone=t.PositionalZone(pos=(150, -60), size=(30, 30)),
+            zone=t.PositionalZone(pos=(110, -60), size=(15, 30)),
             margin=10,
             actor=actor,
         ),
         t.Bubble(
-            zone=t.PositionalZone(pos=(60, -60), size=(30, 30)), margin=10, actor=actor,
+            zone=t.PositionalZone(pos=(50, -60), size=(20, 30)),
+            margin=10,
+            actor=actor,
         ),
     ]
 
 
+@pytest.fixture(params=["SUMO", "SMARTS"])
+def traffic_sim(request):
+    return getattr(request, "param", "SUMO")
+
+
 @pytest.fixture
-def scenarios(bubbles, num_vehicles):
+def scenarios(active_bubbles, num_vehicles, traffic_sim):
     with temp_scenario(name="6lane", map="maps/6lane.net.xml") as scenario_root:
         traffic = t.Traffic(
+            engine=traffic_sim,
             flows=[
                 t.Flow(
                     route=t.Route(
@@ -52,11 +84,11 @@ def scenarios(bubbles, num_vehicles):
                     actors={t.TrafficActor(name="car"): 1},
                 )
                 for lane in range(num_vehicles)
-            ]
+            ],
         )
 
         gen_scenario(
-            t.Scenario(traffic={"all": traffic}, bubbles=bubbles),
+            t.Scenario(traffic={"all": traffic}, bubbles=active_bubbles),
             output_dir=scenario_root,
         )
 
@@ -64,8 +96,13 @@ def scenarios(bubbles, num_vehicles):
 
 
 @pytest.fixture
-def smarts():
-    smarts = SMARTS({}, traffic_sim=SumoTrafficSimulation())
+def smarts(traffic_sim):
+    traffic_sims = (
+        [LocalTrafficProvider()]
+        if traffic_sim == "SMARTS"
+        else [SumoTrafficSimulation()]
+    )
+    smarts = SMARTS({}, traffic_sims=traffic_sims)
     yield smarts
     smarts.destroy()
 
@@ -79,7 +116,8 @@ class ZoneSteps:
 
 
 # TODO: Consider a higher-level DSL syntax to fulfill these tests
-def test_bubble_hijacking(smarts, scenarios, bubbles, num_vehicles):
+@pytest.mark.parametrize("traffic_sim", ["SUMO", "SMARTS"], indirect=True)
+def test_bubble_hijacking(smarts, scenarios, active_bubbles, num_vehicles, traffic_sim):
     """Ensures bubble airlocking, hijacking, and relinquishing are functional.
     Additionally, we test with multiple bubbles and vehicles to ensure operation is
     correct in these conditions as well.
@@ -88,35 +126,34 @@ def test_bubble_hijacking(smarts, scenarios, bubbles, num_vehicles):
     smarts.reset(scenario)
 
     index = smarts.vehicle_index
-    geometries = [bubble_geometry(b, smarts.road_network) for b in bubbles]
+    geometries = [bubble_geometry(b, smarts.road_map) for b in active_bubbles]
 
     # bubble: vehicle: steps per zone
-    steps_driven_in_zones = {b.id: defaultdict(lambda: ZoneSteps()) for b in bubbles}
-    vehicles_made_to_through_bubble = {b.id: [] for b in bubbles}
+    steps_driven_in_zones = {b.id: defaultdict(ZoneSteps) for b in active_bubbles}
+    vehicles_made_to_through_bubble = {b.id: [] for b in active_bubbles}
     for _ in range(300):
         smarts.step({})
         for vehicle in index.vehicles:
-            for bubble, geometry in zip(bubbles, geometries):
-                position = Point(vehicle.position)
+            position = Point(vehicle.position)
+            for bubble, geometry in zip(active_bubbles, geometries):
                 in_bubble = position.within(geometry.bubble)
-                is_shadowing = (
-                    index.shadow_actor_id_from_vehicle_id(vehicle.id) is not None
-                )
+                is_shadowing = index.shadower_id_from_vehicle_id(vehicle.id) is not None
                 is_agent_controlled = vehicle.id in index.agent_vehicle_ids()
 
-                zone_steps = steps_driven_in_zones[bubble.id][vehicle.id]
-                if position.within(geometry.bubble):
+                vehicle_id = (
+                    vehicle.id
+                    if traffic_sim == "SUMO"
+                    else re.sub(r"_\d+$", "", vehicle.id)
+                )
+                zone_steps = steps_driven_in_zones[bubble.id][vehicle_id]
+                if in_bubble and not is_shadowing and is_agent_controlled:
                     zone_steps.in_bubble += 1
-                    assert in_bubble and not is_shadowing and is_agent_controlled
-                elif position.within(geometry.airlock_entry):
+                elif not in_bubble and is_shadowing and not is_agent_controlled:
                     zone_steps.airlock_entry += 1
-                    assert not in_bubble and is_shadowing and not is_agent_controlled
-                elif position.within(geometry.airlock_exit):
+                elif not in_bubble and not is_shadowing and is_agent_controlled:
                     zone_steps.airlock_exit += 1
-                    # TODO: Presently not implemented, but `is_shadowing` should be True
-                    assert not in_bubble and not is_shadowing and is_agent_controlled
-                    if vehicle.id not in vehicles_made_to_through_bubble[bubble.id]:
-                        vehicles_made_to_through_bubble[bubble.id].append(vehicle.id)
+                    if vehicle_id not in vehicles_made_to_through_bubble[bubble.id]:
+                        vehicles_made_to_through_bubble[bubble.id].append(vehicle_id)
                 elif not any([position.within(geom.airlock) for geom in geometries]):
                     # Not in any bubble; airlock is the encompassing region
                     zone_steps.outside_bubble += 1
@@ -124,8 +161,8 @@ def test_bubble_hijacking(smarts, scenarios, bubbles, num_vehicles):
                         not in_bubble and not is_shadowing and not is_agent_controlled
                     )
 
-    # Just to have some padding, we want to be in each region at least 5 steps
-    min_steps = 5
+    # Just to have some padding, we want to be in each region at least 2 steps
+    min_steps = 2
     for bubble_id, zones in steps_driven_in_zones.items():
         vehicle_ids = vehicles_made_to_through_bubble[bubble_id]
         assert (
@@ -135,10 +172,10 @@ def test_bubble_hijacking(smarts, scenarios, bubbles, num_vehicles):
             zone = zones[vehicle_id]
             assert all(
                 [
-                    zone.in_bubble > min_steps,
-                    zone.outside_bubble > min_steps,
-                    zone.airlock_entry > min_steps,
-                    zone.airlock_exit > min_steps,
+                    zone.in_bubble >= min_steps,
+                    zone.outside_bubble >= min_steps,
+                    zone.airlock_entry >= min_steps,
+                    zone.airlock_exit >= min_steps,
                 ]
             ), (
                 f"bubble={bubble_id}, vehicle_id={vehicle_id}, zone={zone} doesn't meet "

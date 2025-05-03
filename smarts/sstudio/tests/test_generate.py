@@ -1,25 +1,52 @@
+# MIT License
+#
+# Copyright (C) 2021. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
 import os
-import pytest
 import tempfile
-from xml.etree.ElementTree import ElementTree
 from typing import Sequence
+from xml.etree.ElementTree import ElementTree
 
-from smarts.sstudio import gen_traffic, gen_missions
-from smarts.sstudio.types import (
-    Traffic,
-    Flow,
-    Route,
-    TrafficActor,
+import pytest
+
+from smarts.core.scenario import Scenario
+from smarts.sstudio.genscenario import gen_map_spec_artifact, gen_traffic
+from smarts.sstudio.sstypes import (
     Distribution,
-    LaneChangingModel,
+    Flow,
     JunctionModel,
+    LaneChangingModel,
+    MapSpec,
     Mission,
+    Route,
+    Traffic,
+    TrafficActor,
 )
 
 
 @pytest.fixture
 def traffic() -> Traffic:
-    car1 = TrafficActor(name="car", speed=Distribution(sigma=0.2, mean=1.0),)
+    car1 = TrafficActor(
+        name="car",
+        speed=Distribution(sigma=0.2, mean=1.0),
+    )
     car2 = TrafficActor(
         name="car",
         speed=Distribution(sigma=0.2, mean=0.8),
@@ -34,7 +61,10 @@ def traffic() -> Traffic:
                     begin=(f"edge-{r[0]}", 0, 30), end=(f"edge-{r[1]}", 0, -30)
                 ),
                 rate=1.0,
-                actors={car1: 0.5, car2: 0.5,},
+                actors={
+                    car1: 0.5,
+                    car2: 0.5,
+                },
             )
             for r in [("west-WE", "east-WE"), ("east-EW", "west-EW")]
         ]
@@ -52,18 +82,78 @@ def missions() -> Sequence[Mission]:
 def test_generate_traffic(traffic: Traffic):
     with tempfile.TemporaryDirectory() as temp_dir:
         gen_traffic(
-            "scenarios/intersections/4lane_t",
+            "scenarios/sumo/intersections/4lane_t",
             traffic,
             output_dir=temp_dir,
             name="generated",
         )
 
-        with open("smarts/sstudio/tests/baseline.rou.xml") as f:
-            items = [x.items() for x in ElementTree(file=f).iter()]
+        _compare_files(
+            "smarts/sstudio/tests/baseline.rou.xml",
+            os.path.join(temp_dir, "traffic", "generated.rou.xml"),
+        )
 
-        with open(os.path.join(temp_dir, "traffic", "generated.rou.xml")) as f:
-            generated_items = [x.items() for x in ElementTree(file=f).iter()]
 
-        print(sorted(items))
-        print(sorted(generated_items))
-        assert sorted(items) == sorted(generated_items)
+def _compare_files(file1, file2):
+    with open(file1, encoding="UTF-8") as f:
+        items = [x.items() for x in ElementTree(file=f).iter()]
+
+    with open(file2, encoding="UTF-8") as f:
+        generated_items = [x.items() for x in ElementTree(file=f).iter()]
+
+    sorted_items = sorted(items)
+    sorted_generated_items = sorted(generated_items)
+    if not sorted_items == sorted_generated_items:
+        for a, b in zip(sorted_items, sorted_generated_items):
+            assert a == b, f"{file1} is different than {file2}"
+
+
+def _gen_map_from_spec(scenario_root: str, map_spec: MapSpec):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gen_map_spec_artifact(scenario_root, map_spec, output_dir=temp_dir)
+        found_map_spec = Scenario.discover_map(temp_dir)
+        assert found_map_spec
+        road_map = found_map_spec.builder_fn(found_map_spec)
+        assert road_map
+
+
+def test_generate_sumo_map():
+    scenario_root = "scenarios/sumo/intersections/4lane_t"
+    map_file = "map.net.xml"
+
+    map_path = os.path.join(scenario_root, map_file)
+    map_spec = MapSpec(map_path)
+    _gen_map_from_spec(scenario_root, map_spec)
+
+    lw = 5.2
+    lps = 3.14
+
+    def fake_map_builder(map_spec: MapSpec) -> bool:
+        assert map_spec.source == map_path
+        assert map_spec.default_lane_width == lw
+        assert map_spec.lanepoint_spacing == lps
+        return True
+
+    map_spec = MapSpec(map_path, lps, lw, fake_map_builder)
+    _gen_map_from_spec(scenario_root, map_spec)
+
+
+def test_generate_od_map():
+    scenario_root = "scenarios/open_drive/od_4lane"
+    map_file = "map.xodr"
+
+    map_path = os.path.join(scenario_root, map_file)
+    map_spec = MapSpec(map_path)
+    _gen_map_from_spec(scenario_root, map_spec)
+
+    lw = 3.7
+    lps = 1.0
+
+    def fake_map_builder(map_spec: MapSpec) -> bool:
+        assert map_spec.source == map_path
+        assert map_spec.default_lane_width == lw
+        assert map_spec.lanepoint_spacing == lps
+        return True
+
+    map_spec = MapSpec(map_path, lps, lw, fake_map_builder)
+    _gen_map_from_spec(scenario_root, map_spec)

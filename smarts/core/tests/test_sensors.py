@@ -1,18 +1,57 @@
+# MIT License
+#
+# Copyright (C) 2021. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+import importlib.resources as pkg_resources
+import math
+import warnings
+from functools import partial
 from unittest import mock
 
 import numpy as np
 import pytest
-
 from helpers.scenario import temp_scenario
-from smarts.core.coordinates import Heading, Pose
-from smarts.core.mission_planner import MissionPlanner
+
+from smarts.core import glsl
+from smarts.core.agent_interface import (
+    CustomRenderCameraDependency,
+    CustomRenderVariableDependency,
+)
+from smarts.core.coordinates import Heading, Pose, RefLinePoint
+from smarts.core.observations import CustomRenderData
+from smarts.core.plan import Plan
 from smarts.core.scenario import Scenario
-from smarts.core.sensors import DrivenPathSensor
-from smarts.core.sensors import WaypointsSensor
-from smarts.core.waypoints import Waypoints
-from smarts.sstudio import types as t
+from smarts.core.sensor import (
+    CustomRenderSensor,
+    LanePositionSensor,
+    RoadWaypointsSensor,
+)
+from smarts.core.sensors import (
+    AccelerometerSensor,
+    DrivenPathSensor,
+    TripMeterSensor,
+    ViaSensor,
+    WaypointsSensor,
+)
 from smarts.sstudio import gen_scenario
-from smarts.core.agent_interface import AgentBehavior, AgentInterface
+from smarts.sstudio import sstypes as t
 
 AGENT_ID = "Agent-007"
 
@@ -22,18 +61,20 @@ def test_driven_path_sensor():
     sim = mock.Mock()
 
     max_path_length = 5
-    sensor = DrivenPathSensor(vehicle, max_path_length=max_path_length)
+    sensor = DrivenPathSensor(max_path_length=max_path_length)
 
     positions = [(x, 0, 0) for x in range(0, 100, 10)]
     sim_times = list(range(0, 50, 5))
     for idx, (position, sim_time) in enumerate(zip(positions, sim_times)):
         sim.elapsed_sim_time = sim_time
-        vehicle.position = position
-        sensor.track_latest_driven_path(sim)
+        vehicle.pose.position = position
+        sensor.track_latest_driven_path(sim.elapsed_sim_time, vehicle)
 
         if idx >= 3:
-            assert sensor.distance_travelled(sim, last_n_steps=3) == 30
-            assert sensor.distance_travelled(sim, last_n_seconds=10) == 20
+            assert sensor.distance_travelled(sim.elapsed_sim_time, last_n_steps=3) == 30
+            assert (
+                sensor.distance_travelled(sim.elapsed_sim_time, last_n_seconds=10) == 20
+            )
 
         assert len(sensor()) <= max_path_length
 
@@ -41,137 +82,231 @@ def test_driven_path_sensor():
 
 
 @pytest.fixture
-def scenarios():
+def scenario():
     with temp_scenario(name="straight", map="maps/6lane.net.xml") as scenario_root:
         ego_missions = [
             t.Mission(
-                t.Route(begin=("edge-west-WE", 0, 10), end=("edge-east-WE", 0, "max"),)
+                t.Route(
+                    begin=("edge-west-WE", 0, 10),
+                    end=("edge-east-WE", 0, "max"),
+                )
             ),
         ]
         gen_scenario(
-            t.Scenario(ego_missions=ego_missions), output_dir=scenario_root,
+            t.Scenario(ego_missions=ego_missions),
+            output_dir=scenario_root,
         )
 
-        yield Scenario.variations_for_all_scenario_roots(
-            [str(scenario_root)], [AGENT_ID]
+        return next(
+            Scenario.variations_for_all_scenario_roots([str(scenario_root)], [AGENT_ID])
         )
 
 
-def test_waypoints_sensor(scenarios):
-    scenario = next(scenarios)
+def test_trip_meter_sensor(scenario):
+
     sim = mock.Mock()
-    vehicle = mock.Mock()
-    vehicle.pose = Pose(
-        position=np.array([33, -65, 0]), orientation=[0, 0, 0, 0], heading_=Heading(0),
+    vehicle_state = mock.Mock()
+    vehicle_state.pose = Pose(
+        position=np.array([33, -65, 0]),
+        orientation=np.array([0, 0, 0, 0]),
+        heading_=Heading(0),
+    )
+    vehicle_state.length = 3.68
+
+    mission = scenario.missions[AGENT_ID]
+    plan = Plan(scenario.road_map, mission)
+
+    sensor = TripMeterSensor()
+    waypoints_sensor = WaypointsSensor()
+
+    positions = [(x, 0, 0) for x in range(0, 100, 10)]
+    sim_times = list(range(0, 50, 5))
+    for idx, (position, sim_time) in enumerate(zip(positions, sim_times)):
+        sim.elapsed_sim_time = sim_time
+        vehicle_state.position = position
+        vehicle_state.pose = Pose(
+            position=vehicle_state.position,
+            orientation=np.array([0, 0, 0, 0]),
+            heading_=Heading(0),
+        )
+        waypoint_paths = waypoints_sensor(vehicle_state, plan, scenario.road_map)
+        sensor.update_distance_wps_record(
+            waypoint_paths, vehicle_state, plan, sim.road_map
+        )
+
+    assert sensor() == sum(
+        wpf.dist_to(wps.pos)
+        for wpf, wps in zip(sensor._wps_for_distance[:-1], sensor._wps_for_distance[1:])
     )
 
-    mission_planner = MissionPlanner(scenario.waypoints, scenario.road_network)
-    mission = scenario.missions[AGENT_ID]
-    mission_planner.plan(mission)
+    sensor.teardown()
 
-    sensor = WaypointsSensor(sim, vehicle, mission_planner)
-    waypoints = sensor()
+
+def test_waypoints_sensor(scenario):
+    vehicle_state = mock.Mock()
+    vehicle_state.pose = Pose(
+        position=np.array([33, -65, 0]),
+        orientation=np.array([0, 0, 0, 0]),
+        heading_=Heading(0),
+    )
+
+    mission = scenario.missions[AGENT_ID]
+    plan = Plan(scenario.road_map, mission)
+
+    sensor = WaypointsSensor()
+    waypoints = sensor(vehicle_state, plan, scenario.road_map)
 
     assert len(waypoints) == 3
 
-
-@pytest.fixture
-def uturn_scenarios():
-    with temp_scenario(name="straight", map="maps/6lane.net.xml") as scenario_root:
-        ego_missions = [
-            t.Mission(
-                route=t.Route(
-                    begin=("edge-west-WE", 0, 30), end=("edge-west-EW", 0, "max")
-                ),
-                task=t.UTurn(),
-            ),
-        ]
-        gen_scenario(
-            t.Scenario(ego_missions=ego_missions), output_dir=scenario_root,
-        )
-
-        yield Scenario.variations_for_all_scenario_roots(
-            [str(scenario_root)], [AGENT_ID]
-        )
+    sensor.teardown()
 
 
-def test_waypoints_sensor_with_uturn_task(uturn_scenarios):
-    scenario = next(uturn_scenarios)
-    sim = mock.Mock()
-    vehicle = mock.Mock()
-    sim.elapsed_sim_time = 1
-    sim.timestep_sec = 0.1
-    nei_vehicle = mock.Mock()
-    nei_vehicle.pose = Pose(
-        position=np.array([93, -59, 0]), orientation=[0, 0, 0, 0], heading_=Heading(0),
-    )
-    nei_vehicle.speed = 13.8
-    sim.neighborhood_vehicles_around_vehicle = mock.MagicMock(
-        return_value=[nei_vehicle]
+def test_road_waypoints_sensor(scenario):
+    assert isinstance(scenario, Scenario)
+    assert scenario.road_map.map_spec
+    assert scenario.road_map.map_spec.lanepoint_spacing == 1.0
+
+    vehicle_state = mock.Mock()
+    vehicle_state.pose = Pose(
+        position=np.array([33, -65, 0]),
+        orientation=np.array([0, 0, 0, 0]),
+        heading_=Heading(0),
     )
 
-    vehicle.pose = Pose(
-        position=np.array([25, -61, 0]), orientation=[0, 0, 0, 0], heading_=Heading(0),
-    )
-    mission_planner = MissionPlanner(
-        scenario.waypoints, scenario.road_network, AgentBehavior(aggressiveness=3)
-    )
     mission = scenario.missions[AGENT_ID]
-    mission_planner.plan(mission)
-    mission_planner._task_is_triggered = True
+    plan = Plan(scenario.road_map, mission)
 
-    sensor = WaypointsSensor(sim, vehicle, mission_planner)
-    waypoints = sensor()
+    sensor = RoadWaypointsSensor(4)
+    road_waypoints = sensor(vehicle_state, plan, scenario.road_map)
 
-    assert len(waypoints) == 1
+    expected_lanes = {
+        "edge-west-WE_0",
+        "edge-west-WE_1",
+        "edge-west-WE_2",
+        "edge-west-EW_0",
+        "edge-west-EW_1",
+        "edge-west-EW_2",
+    }
+
+    assert len(road_waypoints) == 1
+
+    lanes = road_waypoints[-1]
+    assert len(expected_lanes ^ lanes.keys()) == 0
+    assert len(lanes["edge-west-WE_0"][-1]) == 9
+
+    sensor.teardown()
 
 
-@pytest.fixture
-def cut_in_scenarios():
-    with temp_scenario(name="straight", map="maps/6lane.net.xml") as scenario_root:
-        ego_missions = [
-            t.Mission(
-                route=t.Route(
-                    begin=("edge-west-WE", 0, 30), end=("edge-west-EW", 0, "max")
+def test_accelerometer_sensor():
+    dt = 0.1
+    v_per_step = 15.0
+    sensor = AccelerometerSensor()
+
+    def _get_next(step, a_sensor):
+        l_velocity = np.array((0, v_per_step * dt * step))
+        a_velocity = np.array((0, v_per_step * dt * step))
+        return sensor(l_velocity, a_velocity, dt=0.1)
+
+    step = 1
+    (linear_acc, angular_acc, linear_jerk, angular_jerk) = _get_next(step, sensor)
+
+    assert np.all(linear_acc == np.array([0.0, 0.0, 0.0]))
+    assert np.all(angular_acc == np.array([0.0, 0.0, 0.0]))
+    assert np.all(linear_jerk == np.array([0.0, 0.0, 0.0]))
+    assert np.all(angular_jerk == np.array([0.0, 0.0, 0.0]))
+
+    step = 2
+    (linear_acc, angular_acc, linear_jerk, angular_jerk) = _get_next(step, sensor)
+
+    assert np.all(linear_acc == (0, v_per_step))
+    assert np.all(angular_acc == (0, v_per_step))
+    assert np.all(linear_jerk == np.array([0.0, 0.0, 0.0]))
+    assert np.all(angular_jerk == np.array([0.0, 0.0, 0.0]))
+
+    step = 3
+    (linear_acc, angular_acc, linear_jerk, angular_jerk) = _get_next(step, sensor)
+
+    assert np.all(linear_acc == (0, v_per_step))
+    assert np.all(angular_acc == (0, v_per_step))
+    assert np.all(linear_jerk == (0, 0))
+    assert np.all(angular_jerk == (0, 0))
+
+    sensor.teardown()
+
+
+def test_lane_position_sensor(scenario):
+    sensor = LanePositionSensor()
+
+    vehicle_state = mock.Mock()
+    vehicle_state.actor_id = "dummy"
+    vehicle_state.pose = Pose(
+        position=np.array([143.0, -11, 0.1]),
+        orientation=np.array([0, 0, 0, 0]),
+        heading_=Heading(0),
+    )
+
+    off = sensor(scenario.road_map.lane_by_id("edge-north-NS_0"), vehicle_state)
+
+    assert off == RefLinePoint(20.999999999999996, 1.004987562112089, 0)
+    sensor.teardown()
+
+
+def test_signals_sensor():
+    pass
+
+
+def test_custom_render_sensor():
+    from smarts.p3d.renderer import Renderer
+
+    renderer = Renderer("R1")
+
+    vehicle_state = mock.Mock()
+    vehicle_state.actor_id = "dummy"
+    vehicle_state.pose = Pose(
+        position=np.array([33, -65, 0]),
+        orientation=np.array([0, 0, 0, 0]),
+        heading_=Heading(0),
+    )
+
+    with pkg_resources.path(glsl, "simplex_shader.frag") as frag_shader:
+
+        sensor_gen = partial(
+            CustomRenderSensor,
+            vehicle_state=vehicle_state,
+            width=256,
+            height=256,
+            resolution=1,
+            fragment_shader_path=frag_shader,
+            renderer=renderer,
+            render_dependencies=(
+                CustomRenderVariableDependency(
+                    value=1.0,
+                    variable_name="scale",
                 ),
-                task=t.CutIn(),
             ),
-        ]
-        gen_scenario(
-            t.Scenario(ego_missions=ego_missions), output_dir=scenario_root,
+            ogm_sensor=None,
+            top_down_rgb_sensor=None,
+            drivable_area_grid_map_sensor=None,
+            occlusion_map_sensor=None,
+        )
+        sensor = sensor_gen(name="simplex")
+        sensor2 = sensor_gen(
+            name="2nd",
+            render_dependencies=(
+                CustomRenderCameraDependency(
+                    camera_dependency_name=sensor.name, variable_name="iChannel0"
+                ),
+                CustomRenderVariableDependency(
+                    value=10.0,
+                    variable_name="scale",
+                ),
+            ),
         )
 
-        yield Scenario.variations_for_all_scenario_roots(
-            [str(scenario_root)], [AGENT_ID]
-        )
+    renderer.render()
 
+    image: CustomRenderData = sensor2(renderer)
+    assert image.data.shape == (256, 256, 3)
 
-def test_waypoints_sensor_with_cut_in_task(cut_in_scenarios):
-    scenario = next(cut_in_scenarios)
-
-    sim = mock.Mock()
-    nei_vehicle = mock.Mock()
-    nei_vehicle.speed = 10
-    sim.elapsed_sim_time = 4
-    nei_vehicle.pose = Pose(
-        position=np.array([25, -68, 0]), orientation=[0, 0, 0, 0], heading_=Heading(0),
-    )
-    sim.neighborhood_vehicles_around_vehicle = mock.MagicMock(
-        return_value=[nei_vehicle]
-    )
-
-    vehicle = mock.Mock()
-    vehicle.pose = Pose(
-        position=np.array([35, -65, 0]), orientation=[0, 0, 0, 0], heading_=Heading(0),
-    )
-
-    mission_planner = MissionPlanner(
-        scenario.waypoints, scenario.road_network, AgentBehavior(aggressiveness=3)
-    )
-    mission = scenario.missions[AGENT_ID]
-    mission_planner.plan(mission)
-
-    sensor = WaypointsSensor(sim, vehicle, mission_planner)
-    waypoints = sensor()
-
-    assert len(waypoints) == 1
+    sensor.teardown()
+    renderer.destroy()

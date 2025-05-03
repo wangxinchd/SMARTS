@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -29,6 +29,7 @@ import { useRef, useEffect } from "react";
 
 import { ActorTypes } from "../enums.js";
 import { vehicleMeshColor } from "../render_helpers.js";
+import { SceneColors as SceneColors } from "../helpers/scene_colors.js";
 
 // Driven path geometry
 export default function DrivenPaths({
@@ -65,11 +66,11 @@ export default function DrivenPaths({
         } else {
           let geomPos = new Vector2(
             drivenPath[i].position.x,
-            drivenPath[i].position.z
+            drivenPath[i].position.z,
           );
           let newGeomPos = Vector2.Center(
             new Vector2(...worldState.traffic[vehicle_id].driven_path[0]),
-            new Vector2(...worldState.traffic[vehicle_id].driven_path[1])
+            new Vector2(...worldState.traffic[vehicle_id].driven_path[1]),
           );
           if (geomPos.equalsWithEpsilon(newGeomPos, 0.0001)) {
             newDrivenPathGeometries[vehicle_id] = [];
@@ -87,35 +88,30 @@ export default function DrivenPaths({
     if (egoDrivenPathModel.material == null) {
       egoDrivenPathModel.material = new StandardMaterial(
         "ego-driven-path-material",
-        scene
+        scene,
       );
       egoDrivenPathModel.material.specularColor = new Color3(0, 0, 0);
       egoDrivenPathModel.material.diffuseColor = new Color4(
-        ...worldState.scene_colors["ego_driven_path"]
+        ...SceneColors.EgoDrivenPath,
       );
-      egoDrivenPathModel.material.alpha =
-        worldState.scene_colors["ego_driven_path"][3];
+      egoDrivenPathModel.material.alpha = SceneColors.EgoDrivenPath[3];
     }
 
     if (socialDrivenPathModel.material == null) {
       socialDrivenPathModel.material = new StandardMaterial(
         "social-driven-path-material",
-        scene
+        scene,
       );
       socialDrivenPathModel.material.specularColor = new Color3(0, 0, 0);
-      let color = vehicleMeshColor(
-        ActorTypes.SOCIAL_AGENT,
-        worldState.scene_colors
-      );
+      let color = vehicleMeshColor(ActorTypes.SOCIAL_AGENT);
       socialDrivenPathModel.material.diffuseColor = new Color4(...color);
-      socialDrivenPathModel.material.alpha =
-        worldState.scene_colors["ego_driven_path"][3];
+      socialDrivenPathModel.material.alpha = SceneColors.EgoDrivenPath[3];
     }
 
     // Add in new driven path segments
     let drivenPathOffsetY = 0.1;
     for (const [vehicle_id, trafficActor] of Object.entries(
-      worldState.traffic
+      worldState.traffic,
     )) {
       if (!(vehicle_id in newDrivenPathGeometries)) {
         newDrivenPathGeometries[vehicle_id] = [];
@@ -129,23 +125,23 @@ export default function DrivenPaths({
         let drivenPathSegment_ = null;
         if (trafficActor.actor_type == ActorTypes.SOCIAL_AGENT) {
           drivenPathSegment_ = socialDrivenPathModel.createInstance(
-            "social-driven-path-segment"
+            "social-driven-path-segment",
           );
         } else {
           drivenPathSegment_ = egoDrivenPathModel.createInstance(
-            "ego-driven-path-segment"
+            "ego-driven-path-segment",
           );
         }
 
         let p0 = new Vector3(
           trafficActor.driven_path[i][0],
           drivenPathOffsetY,
-          trafficActor.driven_path[i][1]
+          trafficActor.driven_path[i][1],
         );
         let p1 = new Vector3(
           trafficActor.driven_path[i + 1][0],
           drivenPathOffsetY,
-          trafficActor.driven_path[i + 1][1]
+          trafficActor.driven_path[i + 1][1],
         );
 
         drivenPathSegment_.position = Vector3.Center(p0, p1);
@@ -158,7 +154,7 @@ export default function DrivenPaths({
         drivenPathSegment_.rotation = Vector3.RotationFromAxis(
           axis1,
           axis2,
-          axis3
+          axis3,
         );
 
         newDrivenPathGeometries[vehicle_id].push(drivenPathSegment_);

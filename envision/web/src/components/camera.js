@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -42,7 +42,7 @@ export default function Camera({ scene, roadNetworkBbox, egoView }) {
     let egoCamera = new UniversalCamera(
       "ego-camera",
       new Vector3(0, 5, -15), // Relative to camera root position
-      scene
+      scene,
     );
     egoCamera.parent = egoCamRoot;
     egoCamRootRef.current = egoCamRoot;
@@ -55,7 +55,7 @@ export default function Camera({ scene, roadNetworkBbox, egoView }) {
       0, // beta
       200, // radius
       new Vector3(0, 0, 0), // target
-      scene
+      scene,
     );
     thirdPersonCamera.attachControl(canvas, true);
     thirdPersonCamera.panningSensibility = 50;
@@ -79,7 +79,7 @@ export default function Camera({ scene, roadNetworkBbox, egoView }) {
     thirdPersonCamera.target.z = mapCenter[1];
     thirdPersonCamera.radius = Math.max(
       Math.abs(roadNetworkBbox[0] - roadNetworkBbox[2]),
-      Math.abs(roadNetworkBbox[1] - roadNetworkBbox[3])
+      Math.abs(roadNetworkBbox[1] - roadNetworkBbox[3]),
     );
   }, [JSON.stringify(roadNetworkBbox)]);
 

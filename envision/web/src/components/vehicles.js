@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -20,24 +20,36 @@
 import {
   Vector3,
   Color3,
+  Color4,
   SceneLoader,
   StandardMaterial,
   Quaternion,
   MeshBuilder,
   Mesh,
-  Color4,
   BoundingInfo,
+  ActionManager,
+  ExecuteCodeAction,
 } from "@babylonjs/core";
 
 import { useRef, useEffect } from "react";
 
 import { ActorTypes } from "../enums.js";
+import { SceneColors } from "../helpers/scene_colors.js";
 import { intersection, difference } from "../math.js";
 import {
   vehicleMeshFilename,
   vehicleMeshColor,
   buildLabel,
 } from "../render_helpers.js";
+
+const DEBUG_PROPS = [
+  "actor_id",
+  "position",
+  "speed",
+  "heading",
+  "actor_type",
+  "vehicle_type",
+];
 
 let meshesLoaded = (vehicleMeshTemplates) => {
   for (const [_, mesh] of Object.entries(vehicleMeshTemplates)) {
@@ -54,6 +66,8 @@ export default function Vehicles({
   worldState,
   vehicleRootUrl,
   egoView,
+  setVehicleSelected,
+  setDebugInfo,
 }) {
   if (scene == null) {
     return null;
@@ -70,7 +84,7 @@ export default function Vehicles({
   // Load mesh asynchronously
   useEffect(() => {
     for (const [vehicleFilename, meshTemplate] of Object.entries(
-      vehicleMeshTemplates
+      vehicleMeshTemplates,
     )) {
       if (meshTemplate != null) {
         continue;
@@ -82,25 +96,33 @@ export default function Vehicles({
         vehicleFilename,
         scene,
         (meshes) => {
-          let rootMesh = meshes[0];
-          rootMesh.isVisible = false;
+          let originalRootMesh = meshes[0];
+          originalRootMesh.isVisible = false;
           let rootMeshMin = new Vector3();
           let rootMeshMax = new Vector3();
-          let childMeshes = rootMesh.getChildMeshes();
+          let childMeshes = originalRootMesh.getChildMeshes();
           for (let i = 0; i < childMeshes.length; i++) {
             let child = childMeshes[i];
             child.isVisible = false;
 
             let material = new StandardMaterial(
               `material-${vehicleFilename}`,
-              scene
+              scene,
             );
             material.backFaceCulling = false;
-            material.specularColor = new Color3(0, 0, 0);
+            material.disableLighting = true;
+            material.emissiveColor = Color3.White();
+            // Instance buffers must be used because setting the diffuse color on the instance material
+            // changes the color of all instance meshes because they share the same material reference.
+            // See: https://doc.babylonjs.com/features/featuresDeepDive/mesh/copies/instances#custom-buffers
+            child.registerInstancedBuffer("color", 4);
             if (child.material) {
               // Currently only use flat shading, replace imported pbr material with standard material
               material.id = child.material.id;
-              material.diffuseColor = child.material.albedoColor;
+              child.instancedBuffers.color = Color4.FromColor3(
+                child.material.albedoColor,
+                1,
+              );
             }
             child.material = material;
 
@@ -116,10 +138,20 @@ export default function Vehicles({
             }
           }
 
-          rootMesh.setBoundingInfo(new BoundingInfo(rootMeshMin, rootMeshMax));
+          // Note bug: `gltf` sourced root nodes must be replaced, removed, or rescaled in order to instance
+          // the mesh. The issue is vaguely described here:
+          // https://forum.babylonjs.com/t/register-instanced-buffer-turns-mesh-instance-black/8445
+          let newRoot = new Mesh(originalRootMesh.name);
+          newRoot.isVisible = false;
+          newRoot.metadata = originalRootMesh.metadata;
+          for (let i = 0; i < childMeshes.length; i++) {
+            let child = childMeshes[i];
+            child.parent = newRoot;
+          }
 
-          vehicleMeshTemplates[vehicleFilename] = rootMesh;
-        }
+          newRoot.setBoundingInfo(new BoundingInfo(rootMeshMin, rootMeshMax));
+          vehicleMeshTemplates[vehicleFilename] = newRoot;
+        },
       );
     }
     // This useEffect is triggered when the vehicleMeshTemplate's keys() change
@@ -164,6 +196,7 @@ export default function Vehicles({
     // Create new meshes
     for (const meshId of vehicleMeshIdsToAdd) {
       let state = worldState.traffic[meshId];
+
       // Vehicle mesh
       let filename = vehicleMeshFilename(state.actor_type, state.vehicle_type);
       if (!vehicleMeshTemplates[filename]) {
@@ -172,46 +205,69 @@ export default function Vehicles({
         continue;
       }
 
-      let color = vehicleMeshColor(state.actor_type, worldState.scene_colors);
+      let color = vehicleMeshColor(state.actor_type);
       let rootMesh = new Mesh(`root-mesh-${meshId}`, scene);
       let childMeshes = vehicleMeshTemplates[filename].getChildMeshes();
       for (const child of childMeshes) {
         let instancedSubMesh = child.createInstance(`${child.name}-${meshId}`);
-        if (
+        instancedSubMesh.alwaysSelectAsActiveMesh = true;
+        if (state.interest && instancedSubMesh.material.id == "body") {
+          instancedSubMesh.instancedBuffers.color = new Color4(
+            ...SceneColors.Interest,
+            1,
+          );
+        } else if (
           state.actor_type == ActorTypes.SOCIAL_VEHICLE ||
           instancedSubMesh.material.id == "body" || // Change the car body color based on actor type
           childMeshes.length == 1
         ) {
-          instancedSubMesh.material.diffuseColor = new Color3(...color);
+          instancedSubMesh.instancedBuffers.color = new Color4(...color, 1);
         }
         rootMesh.addChild(instancedSubMesh);
       }
 
-      // Render bounding box for social vehicle
-      if (state.actor_type == ActorTypes.SOCIAL_VEHICLE) {
-        let boundingInfo = vehicleMeshTemplates[filename].getBoundingInfo();
-        let boxSize = boundingInfo.boundingBox.extendSize.scale(2);
-        let box = MeshBuilder.CreateBox(
-          `boundingbox-${meshId}`,
-          {
-            height: boxSize.y + 0.1,
-            width: boxSize.x + 0.1,
-            depth: boxSize.z + 0.1,
-          },
-          scene
-        );
-        box.position = boundingInfo.boundingBox.center;
+      let boundingInfo = vehicleMeshTemplates[filename].getBoundingInfo();
+      let boxSize = boundingInfo.boundingBox.extendSize.scale(2);
+      let box = MeshBuilder.CreateBox(
+        `boundingbox-${meshId}`,
+        {
+          height: boxSize.y + 0.1,
+          width: boxSize.x + 0.1,
+          depth: boxSize.z + 0.1,
+        },
+        scene,
+      );
 
-        let boxMaterial = new StandardMaterial(
-          `boundingbox-${meshId}-material`,
-          scene
-        );
-        boxMaterial.diffuseColor = new Color4(...color);
-        boxMaterial.specularColor = new Color3(0, 0, 0);
-        boxMaterial.alpha = 0.75;
-        box.material = boxMaterial;
-        rootMesh.addChild(box);
-      }
+      let boxMaterial = new StandardMaterial(
+        `boundingbox-${meshId}-material`,
+        scene,
+      );
+      boxMaterial.diffuseColor = new Color4(...SceneColors.Selection);
+      boxMaterial.specularColor = new Color3(0, 0, 0);
+      boxMaterial.alpha = 0.0;
+
+      box.material = boxMaterial;
+      box.position = boundingInfo.boundingBox.center;
+      box.actionManager = new ActionManager(scene);
+      box.actionManager.registerAction(
+        new ExecuteCodeAction(ActionManager.OnPointerOverTrigger, function (
+          evt,
+        ) {
+          boxMaterial.alpha = 0.5;
+          setVehicleSelected(true);
+          setDebugInfo(evt.meshUnderPointer.parent.metadata.debugInfo);
+        }),
+      );
+      box.actionManager.registerAction(
+        new ExecuteCodeAction(ActionManager.OnPointerOutTrigger, function (
+          evt,
+        ) {
+          boxMaterial.alpha = 0.0;
+          setVehicleSelected(false);
+          setDebugInfo({});
+        }),
+      );
+      rootMesh.addChild(box);
 
       rootMesh.metadata = {};
       rootMesh.metadata.actorType = state.actor_type;
@@ -237,6 +293,12 @@ export default function Vehicles({
       if (!mesh) {
         continue;
       }
+
+      let debugInfo = {};
+      for (const prop of DEBUG_PROPS) {
+        debugInfo[prop] = state[prop];
+      }
+      mesh.metadata.debugInfo = debugInfo;
 
       let pos = state.position;
       mesh.position = new Vector3(pos[0], pos[2], pos[1]);

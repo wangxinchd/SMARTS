@@ -1,14 +1,37 @@
+# MIT License
+#
+# Copyright (C) 2021. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
 import os
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 
 import pytest
+from helpers.bubbles import bubble_geometry
+from helpers.scenario import temp_scenario
 from shapely.geometry import Point
 
-import smarts.sstudio.types as t
-from helpers.scenario import temp_scenario
-from helpers.bubbles import bubble_geometry
+import smarts.sstudio.sstypes as t
 from smarts.core import seed
+from smarts.core.local_traffic_provider import LocalTrafficProvider
 from smarts.core.scenario import Scenario
 from smarts.core.smarts import SMARTS
 from smarts.core.sumo_traffic_simulation import SumoTrafficSimulation
@@ -23,25 +46,34 @@ def bubble():
         actor=t.BoidAgentActor(
             # TODO: Provide a more self-contained way to build agent locators for tests
             name="hive-mind",
-            agent_locator="scenarios.straight.agent_prefabs:pose-boid-agent-v0",
+            agent_locator="scenarios.sumo.straight.3lane_bubble.agent_prefabs:pose-boid-agent-v0",
         ),
     )
 
 
+@pytest.fixture(params=["SUMO", "SMARTS"])
+def traffic_sim(request):
+    return getattr(request, "param", "SUMO")
+
+
 @pytest.fixture
-def scenarios(bubble):
+def scenarios(bubble, traffic_sim):
     with temp_scenario(name="straight", map="maps/straight.net.xml") as scenario_root:
         traffic = t.Traffic(
+            engine=traffic_sim,
             flows=[
                 t.Flow(
                     route=t.Route(
-                        begin=("west", lane_idx, 0), end=("east", lane_idx, "max"),
+                        begin=("west", lane_idx, 0),
+                        end=("east", lane_idx, "max"),
                     ),
                     rate=50,
-                    actors={t.TrafficActor("car"): 1,},
+                    actors={
+                        t.TrafficActor("car"): 1,
+                    },
                 )
                 for lane_idx in range(3)
-            ]
+            ],
         )
 
         gen_scenario(
@@ -53,8 +85,13 @@ def scenarios(bubble):
 
 
 @pytest.fixture
-def smarts():
-    smarts = SMARTS({}, traffic_sim=SumoTrafficSimulation())
+def smarts(traffic_sim):
+    traffic_sims = (
+        [LocalTrafficProvider()]
+        if traffic_sim == "SMARTS"
+        else [SumoTrafficSimulation()]
+    )
+    smarts = SMARTS({}, traffic_sims=traffic_sims)
     yield smarts
     smarts.destroy()
 
@@ -68,6 +105,7 @@ class ZoneSteps:
 
 
 # TODO: Consider a higher-level DSL syntax to fulfill these tests
+@pytest.mark.parametrize("traffic_sim", ["SUMO", "SMARTS"], indirect=True)
 def test_boids(smarts, scenarios, bubble):
     # TODO: this is a hack to specify a seed to make this test pass
     seed(int(os.getenv("PYTHONHASHSEED", 42)))
@@ -76,7 +114,7 @@ def test_boids(smarts, scenarios, bubble):
     smarts.reset(scenario)
 
     index = smarts.vehicle_index
-    geometry = bubble_geometry(bubble, smarts.road_network)
+    geometry = bubble_geometry(bubble, smarts.road_map)
 
     triggered_multiple_vehicles_in_bubble = False
     triggered_multiple_vehicles_airlocked = False
@@ -95,19 +133,22 @@ def test_boids(smarts, scenarios, bubble):
         for vehicle in index.vehicles:
             position = Point(vehicle.position)
             in_bubble = position.within(geometry.bubble)
-            is_shadowing = index.shadow_actor_id_from_vehicle_id(vehicle.id) is not None
+            is_shadowing = index.shadower_id_from_vehicle_id(vehicle.id) is not None
             is_agent_controlled = vehicle.id in index.agent_vehicle_ids()
 
-            zone_steps = steps_driven_in_zones[vehicle.id]
+            vehicle_id = (
+                vehicle.id
+                if traffic_sim == "SUMO"
+                else re.sub(r"_\d+$", "", vehicle.id)
+            )
+            zone_steps = steps_driven_in_zones[vehicle_id]
             if position.within(geometry.bubble):
                 zone_steps.in_bubble += 1
-                hijacked_actor_ids.append(index.actor_id_from_vehicle_id(vehicle.id))
+                hijacked_actor_ids.append(index.owner_id_from_vehicle_id(vehicle.id))
                 assert in_bubble and not is_shadowing and is_agent_controlled
             elif position.within(geometry.airlock_entry):
                 zone_steps.airlock_entry += 1
-                shadowed_actor_ids.append(
-                    index.shadow_actor_id_from_vehicle_id(vehicle.id)
-                )
+                shadowed_actor_ids.append(index.shadower_id_from_vehicle_id(vehicle.id))
                 assert not in_bubble and is_shadowing and not is_agent_controlled
             elif position.within(geometry.airlock_exit):
                 zone_steps.airlock_exit += 1

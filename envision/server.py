@@ -12,38 +12,43 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-import time
-import sys
-import random
-import asyncio
-import threading
-import json
-import bisect
-import signal
-import logging
 import argparse
-from pathlib import Path
-from typing import Dict, Sequence
+import asyncio
+import bisect
 import importlib.resources as pkg_resources
+import json
+import logging
+import math
+import os
+import random
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Union
 
-import tornado.web
-import tornado.gen
-import tornado.ioloop
-import tornado.iostream
-import tornado.websocket
-from tornado.websocket import WebSocketClosedError
+try:
+    import ijson
+    import tornado.gen
+    import tornado.ioloop
+    import tornado.iostream
+    import tornado.web
+    import tornado.websocket
+    from tornado.websocket import WebSocketClosedError
+except:
+    raise ImportError(
+        "Missing dependencies for Envision. Install them using the command `pip install -e .[envision]` at the source directory."
+    )
 
-import smarts.core.models
-from smarts.core.utils.file import path2hash
+import smarts.assets.vehicles.visual_model
 from envision.web import dist as web_dist
-
-logging.basicConfig(level=logging.WARNING)
-
+from smarts.core.utils.file import path2hash
 
 # Mapping of simulation IDs to a set of web client run loops
 WEB_CLIENT_RUN_LOOPS = {}
@@ -51,22 +56,35 @@ WEB_CLIENT_RUN_LOOPS = {}
 # Mapping of simulation ID to the Frames data store
 FRAMES = {}
 
+# Mapping of path to map geometry files
+MAPS = {}
+
 
 class AllowCORSMixin:
+    """A mix-in that adds CORS headers to the page."""
+
+    _HAS_DYNAMIC_ATTRIBUTES = True
+
     def set_default_headers(self):
+        """Setup the default headers.
+        In this case they are the minimum required CORS related headers.
+        """
         self.set_header("Access-Control-Allow-Origin", "*")
         self.set_header("Access-Control-Allow-Headers", "x-requested-with")
         self.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.set_header("Content-Type", "application/octet-stream")
 
     def options(self):
+        """Apply a base response status."""
         self.set_status(204)
         self.finish()
 
 
 class Frame:
-    def __init__(self, data: str, timestamp: int, next_=None):
-        # Time since epoch in seconds
+    """A frame that describes a single envision simulation step."""
+
+    def __init__(self, data: str, timestamp: float, next_=None):
+        """data is a State object that was converted to string using json.dumps"""
         self._timestamp = timestamp
         self._data = data
         self._size = sys.getsizeof(data)
@@ -74,10 +92,12 @@ class Frame:
 
     @property
     def timestamp(self):
+        """The timestamp for this frame."""
         return self._timestamp
 
     @property
     def data(self):
+        """The raw envision data."""
         return self._data
 
     @data.setter
@@ -87,42 +107,46 @@ class Frame:
 
     @property
     def size(self):
+        """The byte size of the frame's raw data."""
         return self._size
 
 
 class Frames:
+    """A managed collection of simulation frames.
+    This collection uses a random discard of simulation frames to stay under capacity.
+    Random discard favors preserving newer frames over time.
+    """
+
     def __init__(self, max_capacity_mb=500):
         self._max_capacity = max_capacity_mb
 
         # XXX: Index of timestamp in `self._timestamps` matches the index of the
         # frame with the same timestamp in `self._frames`.
-        self._timestamps = []
-        self._frames = []
+        self._timestamps: List[float] = []
+        self._frames: List[Frame] = []
 
     @property
-    def start_frame(self):
-        if len(self._frames) == 0:
-            return None
-
-        return self._frames[0]
+    def start_frame(self) -> Optional[Frame]:
+        """The first frame in all available frames."""
+        return self._frames[0] if self._frames else None
 
     @property
-    def start_time(self):
+    def start_time(self) -> Optional[float]:
+        """The first timestamp in all available frames."""
         return self._frames[0].timestamp if self._frames else None
 
     @property
-    def elapsed_time(self):
+    def elapsed_time(self) -> float:
+        """The total elapsed time between the first and last frame."""
         if len(self._frames) == 0:
-            return 0
-
+            return 0.0
         return self._frames[-1].timestamp - self._frames[0].timestamp
 
     def append(self, frame: Frame):
+        """Add a frame to the end of the existing frames."""
         self._enforce_max_capacity()
-
         if len(self._frames) >= 1:
             self._frames[-1].next_ = frame
-
         self._frames.append(frame)
         self._timestamps.append(frame.timestamp)
 
@@ -131,7 +155,6 @@ class Frames:
         frame_idx = bisect.bisect_left(self._timestamps, timestamp)
         if frame_idx >= len(self._frames):
             frame_idx = -1
-
         return self._frames[frame_idx]
 
     def _enforce_max_capacity(self):
@@ -163,46 +186,80 @@ class WebClientRunLoop:
     messages to it as needed.
     """
 
-    def __init__(self, frames, web_client_handler, timestep_sec, seek=None):
+    def __init__(
+        self,
+        frames: Frames,
+        web_client_handler: tornado.websocket.WebSocketHandler,
+        message_frequency: float,
+        message_frame_volume: int,
+        seek: Optional[int] = None,
+    ):
         self._log = logging.getLogger(__class__.__name__)
-        self._frames = frames
-        self._client = web_client_handler
-        self._timestep_sec = timestep_sec
-        self._seek = seek
-        self._thread = None
+        self._frames: Frames = frames
+        self._client: tornado.websocket.WebSocketHandler = web_client_handler
+        self._message_wait_time: float = 1 / (max(0, message_frequency) or math.inf)
+        self._message_frame_volume: int = message_frame_volume
+        self._seek: Optional[int] = seek
+        self._thread: Optional[threading.Thread] = None
 
     def seek(self, offset_seconds):
+        """Indicate to the web-client that it should progress to the nearest frame to the given time."""
         self._seek = offset_seconds
 
     def stop(self):
+        """End the simulation playback."""
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
 
     def run_forever(self):
+        """Starts the connection loop to push frames to the connected web client."""
+
         async def run_loop():
-            # If no frame, wait till one is present
-            frame = self._frames.start_frame
-            while frame is None:
-                await asyncio.sleep(0.1)
-                frame = self._frames.start_frame
+            frame_ptr = None
+            frames_to_send = []
+
+            # wait until we have a start_frame...
+            self._log.debug("Waiting for first frame.")
+            while frame_ptr is None:
+                time.sleep(self._message_wait_time)
+                frame_ptr = self._frames.start_frame
+                frames_to_send = [frame_ptr]
+            self._log.debug("First frame ready.")
 
             while True:
                 # Handle seek
                 if self._seek is not None and self._frames.start_time is not None:
-                    frame = self._frames(self._frames.start_time + self._seek)
+                    frame_ptr = self._frames(self._frames.start_time + self._seek)
+                    if not frame_ptr:
+                        self._log.warning(
+                            "Seek frame missing, reverting to start frame"
+                        )
+                        frame_ptr = self._frames.start_frame
+                    frames_to_send.append(frame_ptr)
                     self._seek = None
 
-                if frame is None:
-                    self._log.warning("Seek frame missing, reverting to start frame")
-                    frame = self._frames.start_frame
+                # Try to get next frames
+                while (
+                    frame_ptr.next_
+                    and len(frames_to_send) <= self._message_frame_volume
+                ):
+                    frame_ptr = frame_ptr.next_
+                    frames_to_send.append(frame_ptr)
 
-                closed = self._push_frame_to_web_client(frame)
-                if closed:
-                    self._log.debug("Socket closed, exiting")
-                    return
+                # If we have new frames, send them to the web client
+                if len(frames_to_send) > 0:
+                    closed = self._push_frames_to_web_client(frames_to_send)
+                    if closed:
+                        self._log.debug("Socket closed, exiting")
+                        return
+                # Otherwise, sleep until next polling loop
+                else:
+                    delay = self._calculate_frame_delay(frame_ptr)
+                    time.sleep(delay)
 
-                frame = await self._wait_for_next_frame(frame)
+                # Reset frame list
+                frames_to_send = []
 
         def sync_run_forever():
             loop = asyncio.new_event_loop()
@@ -214,41 +271,40 @@ class WebClientRunLoop:
         self._thread = threading.Thread(target=sync_run_forever, args=(), daemon=True)
         self._thread.start()
 
-    def _push_frame_to_web_client(self, frame):
+    def _push_frames_to_web_client(self, frames: List[Frame]):
         try:
-            self._client.write_message(
-                json.dumps(
-                    {
-                        "state": frame.data,
-                        "current_elapsed_time": frame.timestamp
-                        - self._frames.start_time,
-                        "total_elapsed_time": self._frames.elapsed_time,
-                    }
-                )
-            )
+            frames_formatted = [
+                {
+                    "state": frame.data,
+                    "current_elapsed_time": frame.timestamp - self._frames.start_time,
+                    "total_elapsed_time": self._frames.elapsed_time,
+                }
+                for frame in frames
+            ]
+            self._client.write_message(json.dumps(frames_formatted))
             return False
         except WebSocketClosedError:
+            self._log.debug("Web client push loop ended.")
             return True
 
-    async def _wait_for_next_frame(self, frame):
-        while True:
-            # TODO: Consider using an asyncio queue instead
-            await asyncio.sleep(self._timestep_sec)
-            if frame.next_ is not None:
-                return frame.next_
+    def _calculate_frame_delay(self, frame_ptr):
+        # we may want to be more clever here in the future...
+        return self._message_wait_time
 
 
 class BroadcastWebSocket(tornado.websocket.WebSocketHandler):
     """This websocket receives the SMARTS state (the other end of the open websocket
     is held by the Envision Client (SMARTS)) and broadcasts it to all web clients
-    that have open websockets via the `StateWebSocket` handler.
+    that have open web-sockets via the `StateWebSocket` handler.
     """
 
     def initialize(self, max_capacity_mb):
+        """Setup this websocket."""
         self._logger = logging.getLogger(self.__class__.__name__)
         self._max_capacity_mb = max_capacity_mb
 
     async def open(self, simulation_id):
+        """Asynchronously open the websocket to broadcast to all web clients."""
         self._logger.debug(f"Broadcast websocket opened for simulation={simulation_id}")
         self._simulation_id = simulation_id
         self._frames = Frames(max_capacity_mb=self._max_capacity_mb)
@@ -256,6 +312,7 @@ class BroadcastWebSocket(tornado.websocket.WebSocketHandler):
         WEB_CLIENT_RUN_LOOPS[simulation_id] = set()
 
     def on_close(self):
+        """Close the broadcast websocket."""
         self._logger.debug(
             f"Broadcast websocket closed for simulation={self._simulation_id}"
         )
@@ -263,31 +320,57 @@ class BroadcastWebSocket(tornado.websocket.WebSocketHandler):
         del FRAMES[self._simulation_id]
 
     async def on_message(self, message):
-        time_since_epoch = time.time()
-        frame = Frame(timestamp=time_since_epoch, data=message)
-        self._frames.append(frame)
+        """Asynchronously receive messages from the Envision client."""
+        it = ijson.parse(message)
+        next(it)  # Discard first entry: prefix="", event="start_array", value=None
+        prefix, event, value = next(it)
+        if prefix == "item" and event == "number":
+            # If the second event is a `number`, it is a payload message.
+            frame_time = float(value)
+            assert isinstance(frame_time, float)
+            self._frames.append(Frame(timestamp=frame_time, data=message))
+        elif prefix == "item" and event == "start_map":
+            # If the second event is a `start_map`, it is a preamble.
+            scenarios = [
+                value
+                for prefix, event, value in it
+                if prefix == "item.scenarios.item" and event == "string"
+            ]
+            path_map = _index_map(scenarios)
+            MAPS.update(path_map)
+        else:
+            raise tornado.web.HTTPError(400, f"Bad request message.")
 
 
 class StateWebSocket(tornado.websocket.WebSocketHandler):
+    """This websocket sits on the other side of the web client. It handles playback and playback
+    control messages from the web-client.
+    """
+
     def initialize(self):
+        """Setup this websocket."""
         self._logger = logging.getLogger(self.__class__.__name__)
 
     def check_origin(self, origin):
+        """Check the validity of the message origin."""
         return True
 
     def get_compression_options(self):
+        """Get the message compression configuration."""
         return {"compression_level": 6, "mem_level": 5}
 
     async def open(self, simulation_id):
+        """Open this socket to listen for web-client playback requests."""
         if simulation_id not in WEB_CLIENT_RUN_LOOPS:
-            raise tornado.web.HTTPError(404)
+            raise tornado.web.HTTPError(404, f"Simulation `{simulation_id}` not found.")
 
-        # TODO: Set this appropriately
-        timestep_sec = 0.1
+        frequency = 10
+        message_frame_volume = 100
         self._run_loop = WebClientRunLoop(
             frames=FRAMES[simulation_id],
             web_client_handler=self,
-            timestep_sec=timestep_sec,
+            message_frequency=frequency,
+            message_frame_volume=message_frame_volume,
             seek=self.get_argument("seek", None),
         )
 
@@ -297,6 +380,7 @@ class StateWebSocket(tornado.websocket.WebSocketHandler):
         self._run_loop.run_forever()
 
     def on_close(self):
+        """Stop listening and close the socket."""
         self._logger.debug(f"State websocket closed")
         for run_loop in WEB_CLIENT_RUN_LOOPS.values():
             if self in run_loop:
@@ -304,24 +388,34 @@ class StateWebSocket(tornado.websocket.WebSocketHandler):
                 run_loop.remove(self._run_loop)
 
     async def on_message(self, message):
+        """Asynchronously handle playback requests."""
         message = json.loads(message)
         if "seek" in message:
             self._run_loop.seek(message["seek"])
 
 
 class FileHandler(AllowCORSMixin, tornado.web.RequestHandler):
-    def initialize(self, path_map: Dict[str, Path] = {}):
+    """This handler serves files to the given requester."""
+
+    def initialize(self, path_map: Dict[str, Union[str, Path]] = {}):
         """FileHandler that serves file for a given ID."""
         self._logger = logging.getLogger(self.__class__.__name__)
         self._path_map = path_map
 
     async def get(self, id_):
-        if id_ not in self._path_map or not self._path_map[id_].exists():
-            raise tornado.web.HTTPError(404)
+        """Serve a resource requested by id."""
+        if id_ not in self._path_map:
+            raise tornado.web.HTTPError(404, f"Map resource {id_} not found")
 
-        await self.serve_chunked(self._path_map[id_])
+        if not Path(self._path_map[id_]).exists():
+            raise tornado.web.HTTPError(
+                404, f"Map file `{self._path_map[id_]}` not found."
+            )
+
+        await self.serve_chunked(Path(self._path_map[id_]))
 
     async def serve_chunked(self, path: Path, chunk_size: int = 1024 * 1024):
+        """Serve a file to the endpoint given a path."""
         with open(path, mode="rb") as f:
             while True:
                 chunk = f.read(chunk_size)
@@ -340,26 +434,25 @@ class FileHandler(AllowCORSMixin, tornado.web.RequestHandler):
 
 
 class MapFileHandler(FileHandler):
-    def initialize(self, scenario_dirs: Sequence):
-        path_map = {}
-        for dir_ in scenario_dirs:
-            path_map.update(
-                {
-                    f"{path2hash(str(glb.parent.resolve()))}.glb": glb
-                    for glb in Path(dir_).rglob("*.glb")
-                }
-            )
+    """This handler serves map geometry to the given endpoint."""
 
-        super().initialize(path_map)
+    def initialize(self):
+        """Setup this handler."""
+        super().initialize(path_map=MAPS)
 
 
 class SimulationListHandler(AllowCORSMixin, tornado.web.RequestHandler):
+    """This handler serves a list of the active simulations."""
+
     async def get(self):
+        """Serve the active simulations."""
         response = json.dumps({"simulations": list(WEB_CLIENT_RUN_LOOPS.keys())})
         self.write(response)
 
 
 class ModelFileHandler(FileHandler):
+    """This model file handler serves vehicle and other models to the client."""
+
     def initialize(self):
         # We store the resource filenames as values in `path_map` and route them
         # through `importlib.resources` for resolution.
@@ -372,80 +465,111 @@ class ModelFileHandler(FileHandler):
                 "coach.glb": "coach.glb",
                 "truck.glb": "truck.glb",
                 "trailer.glb": "trailer.glb",
+                "motorcycle.glb": "motorcycle.glb",
+                "pedestrian.glb": "pedestrian.glb",
             }
         )
 
     async def get(self, id_):
+        """Serve the requested model geometry."""
         if id_ not in self._path_map or not pkg_resources.is_resource(
-            smarts.core.models, self._path_map[id_]
+            smarts.assets.vehicles.visual_model, self._path_map[id_]
         ):
-            raise tornado.web.HTTPError(404)
+            raise tornado.web.HTTPError(404, f"GLB Model `{id_}` not found.")
 
-        with pkg_resources.path(smarts.core.models, self._path_map[id_]) as path:
+        with pkg_resources.path(
+            smarts.assets.vehicles.visual_model, self._path_map[id_]
+        ) as path:
             await self.serve_chunked(path)
 
 
 class MainHandler(tornado.web.RequestHandler):
+    """This handler serves the index file."""
+
     def get(self):
+        """Serve the index file."""
         with pkg_resources.path(web_dist, "index.html") as index_path:
             self.render(str(index_path))
 
 
-def make_app(scenario_dirs: Sequence, max_capacity_mb: float):
-    with pkg_resources.path(web_dist, ".") as dist_path:
-        return tornado.web.Application(
-            [
-                (r"/", MainHandler),
-                (r"/simulations", SimulationListHandler),
-                (r"/simulations/(?P<simulation_id>\w+)/state", StateWebSocket),
-                (
-                    r"/simulations/(?P<simulation_id>\w+)/broadcast",
-                    BroadcastWebSocket,
-                    dict(max_capacity_mb=max_capacity_mb),
-                ),
-                (
-                    r"/assets/maps/(.*)",
-                    MapFileHandler,
-                    dict(scenario_dirs=scenario_dirs),
-                ),
-                (r"/assets/models/(.*)", ModelFileHandler),
-                (r"/(.*)", tornado.web.StaticFileHandler, dict(path=str(dist_path))),
-            ]
+def make_app(max_capacity_mb: float, debug: bool):
+    """Create the envision web server application through composition of services."""
+
+    dist_path = Path(os.path.dirname(web_dist.__file__)).absolute()
+    logging.debug("Creating app with resources at: `%s`", dist_path)
+    return tornado.web.Application(
+        [
+            (r"/", MainHandler),
+            (r"/simulations", SimulationListHandler),
+            (r"/simulations/(?P<simulation_id>\w+)/state", StateWebSocket),
+            (
+                r"/simulations/(?P<simulation_id>\w+)/broadcast",
+                BroadcastWebSocket,
+                dict(max_capacity_mb=max_capacity_mb),
+            ),
+            (
+                r"/assets/maps/(.*)",
+                MapFileHandler,
+            ),
+            (r"/assets/models/(.*)", ModelFileHandler),
+            (r"/(.*)", tornado.web.StaticFileHandler, dict(path=str(dist_path))),
+        ],
+        debug=debug,
+    )
+
+
+def _index_map(scenario_dirs: Sequence[str]) -> Dict[str, Path]:
+    """Finds and indexes all map geometry files in the given scenario directories."""
+    path_map = {}
+    for dir_ in scenario_dirs:
+        path_map.update(
+            {
+                f"{path2hash(str(glb.parents[2].resolve()))}.glb": glb
+                for glb in Path(dir_).rglob("build/map/map.glb")
+            }
         )
+
+    return path_map
 
 
 def on_shutdown():
+    """Callback on shutdown of the envision server."""
     logging.debug("Shutting down Envision")
     tornado.ioloop.IOLoop.current().stop()
 
 
-def run(scenario_dirs, max_capacity_mb=500, port=8081):
-    app = make_app(scenario_dirs, max_capacity_mb)
+def run(
+    max_capacity_mb: int = 500,
+    port: int = 8081,
+    debug: bool = False,
+):
+    """Create and run an envision web server."""
+    app = make_app(max_capacity_mb, debug=debug)
     app.listen(port)
-    logging.debug(f"Envision listening on port={port}")
+    logging.debug("Envision listening on port=%s", port)
 
     ioloop = tornado.ioloop.IOLoop.current()
     signal.signal(
         signal.SIGINT, lambda signal, _: ioloop.add_callback_from_signal(on_shutdown)
     )
+    signal.signal(
+        signal.SIGTERM, lambda signal, _: ioloop.add_callback_from_signal(on_shutdown)
+    )
     ioloop.start()
 
 
 def main():
+    """Main function for when using this file as an entry-point."""
     parser = argparse.ArgumentParser(
         prog="Envision Server",
         description="The Envision server broadcasts SMARTS state to Envision web "
         "clients for visualization.",
     )
     parser.add_argument(
-        "--scenarios",
-        help="A list of directories where scenarios are stored.",
-        default=["./scenarios"],
-        type=str,
-        nargs="+",
-    )
-    parser.add_argument(
-        "--port", help="Port Envision will run on.", default=8081, type=int,
+        "--port",
+        help="Port Envision will run on.",
+        default=8081,
+        type=int,
     )
     parser.add_argument(
         "--max_capacity",
@@ -456,9 +580,16 @@ def main():
         default=500,
         type=float,
     )
+    parser.add_argument(
+        "--debug", help="Run the server with debug mode.", action="store_true"
+    )
     args = parser.parse_args()
 
-    run(scenario_dirs=args.scenarios, max_capacity_mb=args.max_capacity, port=args.port)
+    run(
+        max_capacity_mb=args.max_capacity,
+        port=args.port,
+        debug=args.debug,
+    )
 
 
 if __name__ == "__main__":

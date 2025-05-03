@@ -12,36 +12,31 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 import math
-from enum import Enum
-from functools import partial
 
-from numpy.linalg import matrix_power
 import numpy as np
 
-from scipy import signal
+from smarts.core.chassis import AckermannChassis
 from smarts.core.controllers.trajectory_tracking_controller import (
-    TrajectoryTrackingControllerState,
     TrajectoryTrackingController,
 )
-from smarts.core.chassis import AckermannChassis
-from smarts.core.utils.math import (
+from smarts.core.utils.core_math import (
     lerp,
-    radians_to_vec,
-    signed_dist_to_line,
-    min_angles_difference_signed,
     low_pass_filter,
+    min_angles_difference_signed,
 )
 
 METER_PER_SECOND_TO_KM_PER_HR = 3.6
 
 
 class LaneFollowingControllerState:
+    """Controller state"""
+
     # TODO: Consider making this immutable and making `LaneFollowingController`
     #       generate new state object.
     def __init__(self, target_lane_id):
@@ -58,6 +53,11 @@ class LaneFollowingControllerState:
 
 
 class LaneFollowingController:
+    """A controller that attempts to follow road waypoints along the vehicle's plan.
+
+    Requires the controlled vehicle to have an Ackermann chassis.
+    """
+
     lateral_error = -35
     heading_error = -15
     yaw_rate = -2
@@ -67,20 +67,39 @@ class LaneFollowingController:
     def perform_lane_following(
         cls,
         sim,
-        agent_id,
+        agent_id: str,
         vehicle,
-        controller_state,
+        controller_state: LaneFollowingControllerState,
         sensor_state,
-        target_speed=12.5,
-        lane_change=0,
+        target_speed: float = 12.5,
+        lane_change: int = 0,
     ):
+        """Control a vehicle
+
+        Args:
+            sim:
+                The simulator instance.
+            agent_id:
+                The id of the agent controlling the vehicle. XXX: unsure why this is needed
+            vehicle:
+                The vehicle that is to be controlled.
+            controller_state:
+                The previous controller state from this controller.
+            sensor_state:
+                The current sensor state from the vehicle's sensors.
+            target_speed:
+                The baseline target speed (controller may give more or less regardless.)
+            lane_change:
+                Lane index offset from vehicle's current lane.
+        """
         assert isinstance(vehicle.chassis, AckermannChassis)
         state = controller_state
         # This lookahead value is coupled with a few calculations below, changing it
         # may affect stability of the controller.
-        wp_paths = sensor_state.mission_planner.waypoint_paths_at(
-            sim, vehicle.pose, lookahead=30
+        wp_paths = sim.road_map.waypoint_paths(
+            vehicle.pose, lookahead=16, route=sensor_state.get_plan(sim.road_map).route
         )
+        assert wp_paths, "no waypoints found.  not near lane?"
         current_lane = LaneFollowingController.find_current_lane(
             wp_paths, vehicle.position
         )
@@ -121,7 +140,10 @@ class LaneFollowingController:
         # update the location of the points which its curvature is less than
         # min_curvature.
         if look_ahead_curvature <= min_curvature:
-            state.min_curvature_location = (wp_path[4].pos[0], wp_path[4].pos[1])
+            state.min_curvature_location = (
+                wp_path[4].pos[0],
+                wp_path[4].pos[1],
+            )
 
         # LOOK AHEAD ERROR SETTING
         # look_ahead_wp_num is the ahead waypoint which is used to
@@ -171,19 +193,27 @@ class LaneFollowingController:
             )
 
         speed_error = vehicle.speed - target_speed
-        state.integral_speed_error += speed_error * sim.timestep_sec
-        velocity_error_damping_term = (
-            speed_error - state.speed_error
-        ) / sim.timestep_sec
-        # 0.2 is the coefficent of d-controller for speed tracking
-        # 0.1 is the coefficent of I-controller for speed tracking
-        # 5.5 is the gain of feedforward term. This term is directly
-        # related to the steering angle, this is added to further enhance
-        # the speed tracking performance.
+        state.integral_speed_error += speed_error * sim.last_dt
+        velocity_error_damping_term = (speed_error - state.speed_error) / sim.last_dt
+        # 5.5 is the gain of feedforward term for throttle. This term is
+        # directly related to the steering angle, this is added to further
+        # enhance the speed tracking performance. TODO: currently, the bullet
+        # does not provide the lateral acceleration which is needed for
+        # calculating the front lateral force. we need to replace the coefficient
+        # with better approximation of the front lateral forces using explicit
+        # differention.
+        lateral_force_coefficient = 1.5
+        if vehicle.speed < 8 or target_speed < 6:
+            lateral_force_coefficient = 0
+        # 0.2 is the coefficient of d-controller for speed tracking
+        # 0.1 is the coefficient of I-controller for speed tracking
         raw_throttle += (
             -0.2 * velocity_error_damping_term
             - 0.1 * state.integral_speed_error
-            + abs(5.5 * math.sin(state.steering_state * vehicle.max_steering_wheel))
+            + abs(
+                lateral_force_coefficient
+                * math.sin(state.steering_state * vehicle.max_steering_wheel)
+            )
         )
         state.speed_error = speed_error
         # If the distance of the vehicle to the ahead point for which
@@ -202,7 +232,12 @@ class LaneFollowingController:
         # Linearization of the lateral dynamics are:
         # [lateral error, heading error, yaw_rate, side_slip angle]
         desired_poles = np.array(
-            [cls.lateral_error, cls.heading_error, cls.yaw_rate, cls.side_slip_angle,]
+            [
+                cls.lateral_error,
+                cls.heading_error,
+                cls.yaw_rate,
+                cls.side_slip_angle,
+            ]
         )
 
         LaneFollowingController.calculate_lateral_gains(
@@ -211,13 +246,6 @@ class LaneFollowingController:
         # LOOK AHEAD CONTROLLER
         controller_lat_error = wp_path[look_ahead_wp_num].signed_lateral_error(
             vehicle_look_ahead_pt
-        )
-
-        abs_heading_error = min(
-            abs((vehicle.heading % (2 * math.pi)) - reference_heading),
-            abs(
-                2 * math.pi - abs((vehicle.heading % (2 * math.pi)) - reference_heading)
-            ),
         )
 
         curvature_radius = TrajectoryTrackingController.curvature_calculation(
@@ -255,7 +283,7 @@ class LaneFollowingController:
         # gain for lateral error. The feedforward term based on the
         # curvature is added to enhance the transient performance when
         # the road curvature changes locally.
-        state.lateral_integral_error += sim.timestep_sec * controller_lat_error
+        state.lateral_integral_error += sim.last_dt * controller_lat_error
         # The feed forward term for the  steering controller. This
         # term is proportionate to Ux^2/R. The coefficient 0.15 is
         # chosen to enhance the transient tracking performance.
@@ -274,22 +302,29 @@ class LaneFollowingController:
             * (vehicle.speed) ** 2
         )
         normalized_speed = np.clip(vehicle.speed * 3.6 / 100, 0, 1)
-        heading_speed_gain = lerp(0.5, 14, normalized_speed)
+        heading_speed_gain = -lerp(0.5, 14, normalized_speed)
         yaw_rate_speed_gain = lerp(5.75, 11.75, normalized_speed)
         lateral_speed_gain = np.clip(lerp(-1, 14, normalized_speed), 1, 2)
+
+        max_steering_nomralized = 1
+        if abs(curvature_radius) > 1e7 and lane_change != 0:
+            heading_speed_gain = -4.95
+            yaw_rate_speed_gain = 1
+            lateral_speed_gain = 0.22
+            max_steering_nomralized = 0.12
+
+        z_yaw = vehicle.chassis.velocity_vectors[1][2]
+        heading_error = min_angles_difference_signed(
+            (vehicle.heading % (2 * math.pi)), reference_heading
+        )
         steering_norm = np.clip(
-            -heading_speed_gain
-            * math.degrees(state.heading_error_gain)
-            * (
-                abs_heading_error
-                * np.sign(reference_heading - (vehicle.heading % (2 * math.pi)))
-            )
+            -heading_speed_gain * math.degrees(state.heading_error_gain) * heading_error
             + lateral_speed_gain * state.lateral_error_gain * (controller_lat_error)
-            + yaw_rate_speed_gain * vehicle.chassis.yaw_rate[2]
+            + yaw_rate_speed_gain * z_yaw
             + 0.3 * state.lateral_integral_error
             - steering_controller_feed_forward,
-            -1,
-            1,
+            -max_steering_nomralized,
+            max_steering_nomralized,
         )
         # The steering low pass filter, 5.5 is the constant of the
         # first order linear low pass filter.
@@ -299,7 +334,7 @@ class LaneFollowingController:
             steering_norm,
             state.steering_state,
             steering_filter_constant,
-            sim.timestep_sec,
+            sim.last_dt,
         )
 
         # The Throttle low pass filter, 2 is the constant of the
@@ -311,7 +346,7 @@ class LaneFollowingController:
             throttle_norm,
             state.throttle_state,
             throttle_filter_constant,
-            sim.timestep_sec,
+            sim.last_dt,
             lower_bound=0,
         )
         # Applying control actions to the vehicle
@@ -322,19 +357,49 @@ class LaneFollowingController:
         )
 
         LaneFollowingController._update_target_lane_if_reached_end_of_lane(
-            agent_id, vehicle, controller_state, sensor_state
+            agent_id,
+            vehicle,
+            controller_state,
+            sensor_state.get_plan(sim.road_map),
         )
 
     @staticmethod
     def find_current_lane(wp_paths, vehicle_position):
+        """Find the lane of the vehicle given a set of waypoint paths."""
         relative_distant_lane = [
-            np.linalg.norm(wp_paths[idx][0].pos - vehicle_position[0:2])
+            np.linalg.norm(np.subtract(wp_paths[idx][0].pos, vehicle_position[:2]))
             for idx in range(len(wp_paths))
         ]
         return np.argmin(relative_distant_lane)
 
     @staticmethod
+    def place_poles(A: np.ndarray, B: np.ndarray, poles: np.ndarray) -> np.ndarray:
+        """Given a linear system described by ẋ = Ax + Bu, compute the gain matrix K
+        such that the closed loop eigenvalues of A - BK are in the desired pole locations.
+
+        References:
+         - https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.place_poles.html
+         - https://en.wikipedia.org/wiki/Ackermann%27s_formula
+        """
+
+        # Controllability matrix
+        C = np.hstack(
+            [B] + [np.linalg.matrix_power(A, i) @ B for i in range(1, A.shape[0])]
+        )
+
+        # Desired characteristic polynomial of A - BK
+        poly = np.real(np.poly(poles))
+
+        # Solve using Ackermann's formula
+        n = np.size(poly)
+        p = poly[n - 1] * np.linalg.matrix_power(A, 0)
+        for i in np.arange(1, n):
+            p = p + poly[n - i - 1] * np.linalg.matrix_power(A, i)
+        return np.linalg.solve(C, p)[-1][:]
+
+    @staticmethod
     def calculate_lateral_gains(sim, state, vehicle, desired_poles, target_speed):
+        """Update the state lateral gains"""
         # Only calculate gains if the target_speed is updated.
         # TODO: Replace this w/ an isclose(...) check
         if state.target_speed == target_speed:
@@ -356,11 +421,16 @@ class LaneFollowingController:
                     [
                         0,
                         0,
-                        -(2 * road_stiffness * (half_vehicle_len ** 2))
+                        -(2 * road_stiffness * (half_vehicle_len**2))
                         / (target_speed * vehicle_inertia_z),
                         0,
                     ],
-                    [0, 0, -1, -2 * road_stiffness / (vehicle_mass * target_speed),],
+                    [
+                        0,
+                        0,
+                        -1,
+                        -2 * road_stiffness / (vehicle_mass * target_speed),
+                    ],
                 ]
             )
             input_matrix = np.array(
@@ -371,18 +441,15 @@ class LaneFollowingController:
                     [road_stiffness / (vehicle_mass * target_speed)],
                 ]
             )
-            fsf1 = signal.place_poles(
-                state_matrix, input_matrix, desired_poles, method="KNV0"
+            K = LaneFollowingController.place_poles(
+                state_matrix, input_matrix, desired_poles
             )
-            # 0.01 and 0.015 denote the max and min gains for heading controller
-            # This is done to ensure that the linearization error will not affect
-            # the stability of the controller.
-            state.heading_error_gain = np.clip(fsf1.gain_matrix[0][1], 0.02, 0.04)
-            # 3.4 and 4.1 denote the max and min gains for lateral error controller
-            # As for heading, this is done to ensure that the linearization error
-            # will not affect the stability and performance of the controller.
-            state.lateral_error_gain = np.clip(fsf1.gain_matrix[0][0], 3.4, 4.1)
 
+            # These constants are the min/max gains for the lateral error controller
+            # and the heading controller, respectively. This is done to ensure that
+            # the linearization error will not affect the stability of the controller.
+            state.lateral_error_gain = np.clip(K[0], 3.4, 4.1)
+            state.heading_error_gain = np.clip(K[1], 0.02, 0.04)
         else:
             # 0.01 and 0.36 are initial values for heading and lateral gains
             # This is only done to ensure that the vehicle starts to move for
@@ -392,13 +459,14 @@ class LaneFollowingController:
 
     @staticmethod
     def _update_target_lane_if_reached_end_of_lane(
-        agent_id, vehicle, controller_state, sensor_state
+        agent_id, vehicle, controller_state, plan
     ):
         # When we reach the end of our target lane, we need to update it
-        # to the next lane best lane along the path
+        # to the next best lane along the path
         state = controller_state
-        paths = sensor_state.mission_planner.waypoint_paths_on_lane_at(
-            vehicle.pose, state.target_lane_id, lookahead=2
+        lane = plan.road_map.lane_by_id(state.target_lane_id)
+        paths = lane.waypoint_paths_for_pose(
+            vehicle.pose, lookahead=2, route=plan.route
         )
 
         candidate_next_wps = []

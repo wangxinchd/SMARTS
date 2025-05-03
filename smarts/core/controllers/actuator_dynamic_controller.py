@@ -12,47 +12,42 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-import math
-from enum import Enum
-from functools import partial
-
-from numpy.linalg import matrix_power
 import numpy as np
-
-from scipy import signal
-
-from smarts.core.chassis import AckermannChassis
-from smarts.core.utils.math import (
-    lerp,
-    radians_to_vec,
-    signed_dist_to_line,
-    min_angles_difference_signed,
-    low_pass_filter,
-)
 
 METER_PER_SECOND_TO_KM_PER_HR = 3.6
 
 
 class ActuatorDynamicControllerState:
+    """Controller state information"""
+
     def __init__(self):
         self.last_steering_angle = 0
 
 
 class ActuatorDynamicController:
+    """A controller that maintains the last steering angle."""
+
     @classmethod
     def perform_action(cls, vehicle, action, state, dt_sec):
+        """Perform throttle, break, and steering, keeping the previous steering angle as the start
+        for the next steering angle.
+        """
         throttle, brake, steering_change = action
 
         # The following is the normalized steering change
         # under the assumption that the steering angles at
         # wheels can reach to their maximum values in one
         # second.
-        clipped_steering_change = np.clip(steering_change, -1, 1,)
+        clipped_steering_change = np.clip(
+            steering_change,
+            -1,
+            1,
+        )
 
         p = 0.001  # XXX: Theorized to improve stability, this has yet to be seen.
         steering = np.clip(

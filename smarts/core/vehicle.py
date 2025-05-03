@@ -12,163 +12,136 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-import os
-import yaml
+from __future__ import annotations
+
 import importlib.resources as pkg_resources
 import logging
-from dataclasses import dataclass
+import warnings
+from functools import lru_cache, partial
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
-import numpy
-from direct.showbase.ShowBase import ShowBase
+import numpy as np
 
-from . import models
+import smarts.assets.vehicles.visual_model as smarts_vehicle_visuals
+from smarts.core.sensor import CustomRenderSensor, OcclusionMapSensor
+
+from . import config
+from .actor import ActorRole
 from .chassis import AckermannChassis, BoxChassis, Chassis
 from .colors import SceneColors
-from .coordinates import BoundingBox, Heading, Pose
-from .masks import RenderMasks
-from .sensors import (
+from .coordinates import Dimensions, Heading, Pose
+from .sensor import (
     AccelerometerSensor,
     DrivableAreaGridMapSensor,
     DrivenPathSensor,
+    LanePositionSensor,
     LidarSensor,
     NeighborhoodVehiclesSensor,
     OGMSensor,
     RGBSensor,
     RoadWaypointsSensor,
+    Sensor,
+    SignalsSensor,
     TripMeterSensor,
     ViaSensor,
     WaypointsSensor,
 )
-from .utils.math import rotate_around_point
+from .utils.core_math import rotate_cw_around_point
+from .utils.custom_exceptions import RendererException
+from .vehicle_state import VEHICLE_CONFIGS, VehicleState
 
-
-@dataclass(frozen=True)
-class VehicleState:
-    vehicle_id: str
-    vehicle_type: str
-    pose: Pose
-    dimensions: BoundingBox
-    speed: float = 0
-    steering: float = None
-    yaw_rate: float = None
-    source: str = None  # the source of truth for this vehicle state
-    linear_velocity: numpy.ndarray = None
-    angular_velocity: numpy.ndarray = None
-
-
-@dataclass(frozen=True)
-class VehicleConfig:
-    vehicle_type: str
-    color: tuple
-    dimensions: BoundingBox
-    glb_model: str
-
-
-# A mapping between SUMO's vehicle types and our internal vehicle config.
-# TODO: Don't leak SUMO's types here.
-# XXX: The GLB's dimensions must match the specified dimensions here.
-VEHICLE_CONFIGS = {
-    "passenger": VehicleConfig(
-        vehicle_type="car",
-        color=SceneColors.SocialVehicle.value,
-        dimensions=BoundingBox(length=3.68, width=1.47, height=1.4),
-        glb_model="simple_car.glb",
-    ),
-    "bus": VehicleConfig(
-        vehicle_type="bus",
-        color=SceneColors.SocialVehicle.value,
-        dimensions=BoundingBox(length=7, width=2.25, height=3),
-        glb_model="bus.glb",
-    ),
-    "coach": VehicleConfig(
-        vehicle_type="coach",
-        color=SceneColors.SocialVehicle.value,
-        dimensions=BoundingBox(length=8, width=2.4, height=3.5),
-        glb_model="coach.glb",
-    ),
-    "truck": VehicleConfig(
-        vehicle_type="truck",
-        color=SceneColors.SocialVehicle.value,
-        dimensions=BoundingBox(length=5, width=1.91, height=1.89),
-        glb_model="truck.glb",
-    ),
-    "trailer": VehicleConfig(
-        vehicle_type="trailer",
-        color=SceneColors.SocialVehicle.value,
-        dimensions=BoundingBox(length=10, width=2.5, height=4),
-        glb_model="trailer.glb",
-    ),
-}
-
-# TODO: Replace VehicleConfigs w/ the VehicleGeometry class
-class VehicleGeometry:
-    @classmethod
-    def fromfile(cls, path, color):
-        pass
+if TYPE_CHECKING:
+    from smarts.core import plan
+    from smarts.core.agent_interface import AgentInterface
+    from smarts.core.renderer_base import RendererBase
+    from smarts.core.sensor_manager import SensorManager
+    from smarts.core.smarts import SMARTS
 
 
 class Vehicle:
+    """Represents a single vehicle."""
+
+    _HAS_DYNAMIC_ATTRIBUTES = True  # dynamic pytype attribute
+    _sensor_names = (
+        "ogm_sensor",
+        "rgb_sensor",
+        "lidar_sensor",
+        "driven_path_sensor",
+        "trip_meter_sensor",
+        "drivable_area_grid_map_sensor",
+        "occlusion_map_sensor",
+        "neighborhood_vehicle_states_sensor",
+        "waypoints_sensor",
+        "road_waypoints_sensor",
+        "accelerometer_sensor",
+        "lane_position_sensor",
+        "via_sensor",
+        "signals_sensor",
+    ) + tuple(
+        f"custom_render{i}_sensor"
+        for i in range(config()("core", "max_custom_image_sensors", cast=int))
+    )
+
     def __init__(
         self,
         id: str,
-        pose: Pose,
-        showbase: ShowBase,
         chassis: Chassis,
-        # TODO: We should not be leaking SUMO here.
-        sumo_vehicle_type="passenger",
-        color=None,
+        visual_model_filepath: Optional[str],
+        vehicle_config_type: str = "sedan",
+        vehicle_class: str = "generic_sedan",
+        color: Optional[SceneColors] = None,
         action_space=None,
     ):
-        assert isinstance(pose, Pose)
-
         self._log = logging.getLogger(self.__class__.__name__)
         self._id = id
 
-        self._chassis = chassis
-        self._showbase = showbase
-        self._sumo_vehicle_type = sumo_vehicle_type
+        self._chassis: Chassis = chassis
+        if vehicle_config_type == "sedan":
+            vehicle_config_type = "passenger"
+        self._vehicle_config_type = vehicle_config_type
+        self._vehicle_class = vehicle_class
         self._action_space = action_space
-        self._speed = None
 
         self._meta_create_sensor_functions()
         self._sensors = {}
+        self._visual_model_path = visual_model_filepath
 
-        config = VEHICLE_CONFIGS[sumo_vehicle_type]
+        if self._visual_model_path in {None, ""}:
+            with pkg_resources.path(
+                smarts_vehicle_visuals,
+                VEHICLE_CONFIGS[self._vehicle_config_type].glb_model,
+            ) as path:
+                self._visual_model_path = path
 
         # Color override
-        self._color = color
+        self._color: Optional[SceneColors] = color
         if self._color is None:
-            self._color = config.color
+            self._color = SceneColors.SocialVehicle
 
-        # TODO: Move this into the VehicleGeometry class
-        self._np = self._build_model(pose, config, showbase)
         self._initialized = True
+        self._has_stepped = False
 
     def _assert_initialized(self):
         assert self._initialized, f"Vehicle({self.id}) is not initialized"
 
-    def _build_model(self, pose: Pose, config: VehicleConfig, showbase):
-        with pkg_resources.path(models, config.glb_model) as path:
-            node_path = showbase.loader.loadModel(str(path.absolute()))
-
-        node_path.setName("vehicle-%s" % self._id)
-        node_path.setColor(self._color)
-        pos, heading = pose.as_panda3d()
-        node_path.setPosHpr(*pos, heading, 0, 0)
-        node_path.hide(RenderMasks.DRIVABLE_AREA_HIDE)
-
-        return node_path
+    def __eq__(self, __o: object) -> bool:
+        if self is __o:
+            return True
+        if isinstance(__o, self.__class__) and self.state == __o.state:
+            return True
+        return False
 
     def __repr__(self):
         return f"""Vehicle({self.id},
   pose={self.pose},
   speed={self.speed},
   type={self.vehicle_type},
+  class={self.vehicle_class},
   w={self.width},
   l={self.length},
   h={self.height}
@@ -176,41 +149,45 @@ class Vehicle:
 
     @property
     def id(self):
+        """The id of this vehicle."""
         return self._id
 
     @property
-    def length(self):
+    def length(self) -> float:
+        """The length of this vehicle."""
         self._assert_initialized()
         return self._chassis.dimensions.length
 
     @property
-    def max_steering_wheel(self):
+    def max_steering_wheel(self) -> Optional[float]:
+        """The max steering value the chassis steering wheel can turn to.
+
+        Some chassis types do not support this.
+        """
         self._assert_initialized()
-        return self._chassis.max_steering_wheel
+        return getattr(self._chassis, "max_steering_wheel", None)
 
     @property
-    def width(self):
+    def width(self) -> float:
+        """The width of this vehicle."""
         self._assert_initialized()
         return self._chassis.dimensions.width
 
     @property
-    def height(self):
+    def height(self) -> float:
+        """The height of this vehicle."""
         self._assert_initialized()
         return self._chassis.dimensions.height
 
     @property
-    def speed(self):
+    def speed(self) -> float:
+        """The current speed of this vehicle."""
         self._assert_initialized()
-        if self._speed is not None:
-            return self._speed
-        else:
-            return self._chassis.speed
-
-    def set_speed(self, speed):
-        self._speed = speed
+        return self._chassis.speed
 
     @property
-    def sensors(self):
+    def sensors(self) -> Dict[str, Sensor]:
+        """The sensors attached to this vehicle."""
         self._assert_initialized()
         return self._sensors
 
@@ -220,352 +197,470 @@ class Vehicle:
     #     self._chassis.speed = speed
 
     @property
-    def np(self):
-        self._assert_initialized()
-        return self._np
-
-    @property
-    def vehicle_color(self):
+    def vehicle_color(self) -> Union[SceneColors, None]:
+        """The color of this vehicle (generally used for rendering purposes.)"""
         self._assert_initialized()
         return self._color
 
     @property
-    def state(self):
+    def state(self) -> VehicleState:
+        """The current state of this vehicle."""
         self._assert_initialized()
         return VehicleState(
-            vehicle_id=self.id,
-            vehicle_type=self.vehicle_type,
+            actor_id=self.id,
+            actor_type=self.vehicle_type,
+            source="SMARTS",  # this is the "ground truth" state
+            vehicle_config_type=self._vehicle_config_type,
             pose=self.pose,
             dimensions=self._chassis.dimensions,
             speed=self.speed,
+            # pytype: disable=attribute-error
             steering=self._chassis.steering,
+            # pytype: enable=attribute-error
             yaw_rate=self._chassis.yaw_rate,
-            source="SMARTS",
             linear_velocity=self._chassis.velocity_vectors[0],
             angular_velocity=self._chassis.velocity_vectors[1],
         )
 
     @property
     def action_space(self):
+        """The action space this vehicle uses."""
         self._assert_initialized()
         return self._action_space
 
     @property
     def pose(self) -> Pose:
+        """The pose of this vehicle. Pose is defined as position and orientation."""
         self._assert_initialized()
         return self._chassis.pose
 
     @property
-    def chassis(self):
+    def chassis(self) -> Chassis:
+        """The underlying chassis of this vehicle."""
         self._assert_initialized()
         return self._chassis
 
     @property
     def heading(self) -> Heading:
+        """The heading of this vehicle.
+
+        Note: Heading rotates counterclockwise with north as 0.
+        """
         self._assert_initialized()
         return self._chassis.pose.heading
 
     @property
-    def position(self):
+    def position(self) -> np.ndarray:
+        """The position of this vehicle."""
         self._assert_initialized()
-        pos, _ = self._chassis.pose.as_panda3d()
-        return pos
+        return self._chassis.pose.position
 
     @property
-    def bounding_box(self):
+    def bounding_box(self) -> List[np.ndarray]:
+        """The minimum fitting heading aligned bounding box. Four 2D points representing the minimum fitting box."""
+        # XXX: this doesn't return a smarts.core.coordinates.BoundingBox!
         self._assert_initialized()
-        # Assuming the position is the centre,
+        # Assuming the position is the center,
         # calculate the corner coordinates of the bounding_box
-        half_length = self.length / 2
-        half_width = self.width / 2
-        corners = [(-1, 1), (1, 1), (1, -1), (-1, -1)]
+        origin = self.position[:2]
+        dimensions = np.array([self.width, self.length])
+        corners = np.array([(-1, 1), (1, 1), (1, -1), (-1, -1)]) / 2
+        heading = self.heading
         return [
-            rotate_around_point(
-                point=self.position[:2]
-                + numpy.array(corner) * numpy.array([half_width, half_length]),
-                radians=self.heading,
-                origin=self.position[:2],
+            rotate_cw_around_point(
+                point=origin + corner * dimensions,
+                radians=Heading.flip_clockwise(heading),
+                origin=origin,
             )
             for corner in corners
         ]
 
     @property
-    def vehicle_type(self):
-        return VEHICLE_CONFIGS[self._sumo_vehicle_type].vehicle_type
+    def vehicle_type(self) -> str:
+        """Get the vehicle type name as recognized by SMARTS. (e.g. 'car')"""
+        return VEHICLE_CONFIGS[self._vehicle_config_type].vehicle_type
+
+    @property
+    def vehicle_config_type(self) -> str:
+        """Get the vehicle type identifier. (e.g. 'sedan')"""
+        return self._vehicle_config_type
+
+    @property
+    def vehicle_class(self) -> str:
+        """Get the custom class of vehicle this is. (e.g. 'ford_f150')"""
+        return self._vehicle_class
+
+    @property
+    def valid(self) -> bool:
+        """Check if the vehicle still `exists` and is still operable."""
+        return self._initialized
+
+    @property
+    def sensor_names(self) -> Tuple[str]:
+        """The names of the sensors that are potentially available to this vehicle."""
+        return self._sensor_names
 
     @staticmethod
-    def build_agent_vehicle(
-        sim,
-        vehicle_id,
-        agent_interface,
-        mission_planner,
-        vehicle_filepath,
-        tire_filepath,
-        trainable,
-        surface_patches,
-        controller_filepath,
-        initial_speed=None,
+    def agent_vehicle_dims(
+        mission: "plan.NavigationMission", default: Optional[str] = None
+    ) -> Dimensions:
+        """Get the vehicle dimensions from the mission requirements.
+        Args:
+            A mission for the agent.
+        Returns:
+            The mission vehicle spec dimensions XOR the default "passenger" vehicle dimensions.
+        """
+        if not default:
+            default = config().get_setting("assets", "default_agent_vehicle")
+        if default == "sedan":
+            default = "passenger"
+        default_type = default
+        if mission.vehicle_spec:
+            # mission.vehicle_spec.veh_config_type will always be "passenger" for now,
+            # but we use that value here in case we ever expand our history functionality.
+            vehicle_config_type = mission.vehicle_spec.veh_config_type
+            return Dimensions.copy_with_defaults(
+                mission.vehicle_spec.dimensions,
+                VEHICLE_CONFIGS[vehicle_config_type or default_type].dimensions,
+            )
+        return VEHICLE_CONFIGS[default_type].dimensions
+
+    @classmethod
+    def attach_sensors_to_vehicle(
+        cls,
+        sensor_manager: SensorManager,
+        sim: SMARTS,
+        vehicle: Vehicle,
+        agent_interface: AgentInterface,
+        replace=True,
+        reset_sensors=False,
     ):
-        # Agents can currently only control passenger vehicles
-        vehicle_type = "passenger"
-        chassis_dims = VEHICLE_CONFIGS[vehicle_type].dimensions
-
-        start = mission_planner.mission.start
-        start_pose = Pose.from_front_bumper(
-            front_bumper_position=numpy.array(start.position),
-            heading=start.heading,
-            length=chassis_dims.length,
-        )
-
-        vehicle_color = (
-            SceneColors.Agent.value if trainable else SceneColors.SocialAgent.value
-        )
-
-        if agent_interface.vehicle_type == "sedan":
-            urdf_name = "vehicle"
-        elif agent_interface.vehicle_type == "bus":
-            urdf_name = "bus"
-        else:
-            raise Exception("Vehicle type does not exist!!!")
-
-        if (vehicle_filepath is None) or not os.path.exists(vehicle_filepath):
-            with pkg_resources.path(models, urdf_name + ".urdf") as path:
-                vehicle_filepath = str(path.absolute())
-
-        if (controller_filepath is None) or not os.path.exists(controller_filepath):
-            with pkg_resources.path(
-                models, "controller_parameters.yaml"
-            ) as controller_path:
-                controller_filepath = str(controller_path.absolute())
-        with open(controller_filepath, "r") as controller_file:
-            controller_parameters = yaml.safe_load(controller_file)[
-                agent_interface.vehicle_type
-            ]
-
-        vehicle = Vehicle(
-            id=vehicle_id,
-            pose=start_pose,
-            showbase=sim,
-            chassis=AckermannChassis(
-                pose=start_pose,
-                bullet_client=sim.bc,
-                vehicle_filepath=vehicle_filepath,
-                tire_parameters_filepath=tire_filepath,
-                friction_map=surface_patches,
-                controller_parameters=controller_parameters,
-                initial_speed=initial_speed,
-            ),
-            color=vehicle_color,
-        )
-
-        return vehicle
-
-    @staticmethod
-    def build_social_vehicle(sim, vehicle_id, vehicle_state, vehicle_type):
-        return Vehicle(
-            id=vehicle_id,
-            pose=vehicle_state.pose,
-            showbase=sim,
-            chassis=BoxChassis(
-                pose=vehicle_state.pose,
-                speed=vehicle_state.speed,
-                dimensions=vehicle_state.dimensions,
-                bullet_client=sim.bc,
-            ),
-            sumo_vehicle_type=vehicle_type,
-        )
-
-    @staticmethod
-    def attach_sensors_to_vehicle(sim, vehicle, agent_interface, mission_planner):
+        """Attach sensors as required to satisfy the agent interface's requirements"""
         # The distance travelled sensor is not optional b/c it is used for the score
         # and reward calculation
-        vehicle.attach_trip_meter_sensor(
-            TripMeterSensor(vehicle=vehicle, sim=sim, mission_planner=mission_planner,)
+        vehicle_state = vehicle.state
+        has_no_sensors = len(vehicle.sensors) == 0
+        added_sensors: List[Tuple[str, Sensor]] = []
+
+        if reset_sensors:
+            sensor_manager.remove_actor_sensors_by_actor_id(vehicle.id)
+            # pytype: disable=attribute-error
+            Vehicle.detach_all_sensors_from_vehicle(vehicle)
+            # pytype: enable=attribute-error
+
+        def add_sensor_if_needed(
+            sensor_type,
+            sensor_name: str,
+            condition: bool = True,
+            **kwargs,
+        ):
+            assert (
+                sensor_name in cls._sensor_names
+            ), f"{sensor_name}:{cls._sensor_names}"
+            if (
+                replace
+                or has_no_sensors
+                or (condition and not vehicle.subscribed_to(sensor_name))
+            ):
+                sensor = sensor_type(**kwargs)
+                vehicle.attach_sensor(sensor, sensor_name)
+                added_sensors.append((sensor_name, sensor))
+
+        # pytype: disable=attribute-error
+        add_sensor_if_needed(TripMeterSensor, sensor_name="trip_meter_sensor")
+        add_sensor_if_needed(DrivenPathSensor, sensor_name="driven_path_sensor")
+        if agent_interface.neighborhood_vehicle_states:
+            add_sensor_if_needed(
+                NeighborhoodVehiclesSensor,
+                sensor_name="neighborhood_vehicle_states_sensor",
+                radius=agent_interface.neighborhood_vehicle_states.radius,
+            )
+
+        add_sensor_if_needed(
+            AccelerometerSensor,
+            sensor_name="accelerometer_sensor",
+            condition=agent_interface.accelerometer,
         )
-
-        # The distance travelled sensor is not optional b/c it is used for visualization
-        # done criteria
-        vehicle.attach_driven_path_sensor(DrivenPathSensor(vehicle=vehicle))
-
-        if agent_interface.neighborhood_vehicles:
-            vehicle.attach_neighborhood_vehicles_sensor(
-                NeighborhoodVehiclesSensor(
-                    vehicle=vehicle,
-                    sim=sim,
-                    radius=agent_interface.neighborhood_vehicles.radius,
-                )
-            )
-
-        if agent_interface.accelerometer:
-            vehicle.attach_accelerometer_sensor(
-                AccelerometerSensor(vehicle=vehicle, sim=sim,)
-            )
-
-        if agent_interface.waypoints:
-            vehicle.attach_waypoints_sensor(
-                WaypointsSensor(
-                    sim=sim,
-                    vehicle=vehicle,
-                    mission_planner=mission_planner,
-                    lookahead=agent_interface.waypoints.lookahead,
-                )
-            )
-
+        add_sensor_if_needed(
+            WaypointsSensor,
+            sensor_name="waypoints_sensor",
+            condition=agent_interface.waypoint_paths,
+        )
         if agent_interface.road_waypoints:
-            vehicle.attach_road_waypoints_sensor(
-                RoadWaypointsSensor(
-                    vehicle=vehicle,
-                    sim=sim,
-                    mission_planner=mission_planner,
-                    horizon=agent_interface.road_waypoints.horizon,
-                )
+            add_sensor_if_needed(
+                RoadWaypointsSensor,
+                "road_waypoints_sensor",
+                horizon=agent_interface.road_waypoints.horizon,
             )
-
-        if agent_interface.drivable_area_grid_map:
-            vehicle.attach_drivable_area_grid_map_sensor(
-                DrivableAreaGridMapSensor(
-                    vehicle=vehicle,
-                    width=agent_interface.drivable_area_grid_map.width,
-                    height=agent_interface.drivable_area_grid_map.height,
-                    resolution=agent_interface.drivable_area_grid_map.resolution,
-                    scene_np=sim.np,
-                    showbase=sim,
-                )
-            )
-        if agent_interface.ogm:
-            vehicle.attach_ogm_sensor(
-                OGMSensor(
-                    vehicle=vehicle,
-                    width=agent_interface.ogm.width,
-                    height=agent_interface.ogm.height,
-                    resolution=agent_interface.ogm.resolution,
-                    scene_np=sim.np,
-                    showbase=sim,
-                )
-            )
-        if agent_interface.rgb:
-            vehicle.attach_rgb_sensor(
-                RGBSensor(
-                    vehicle=vehicle,
-                    width=agent_interface.rgb.width,
-                    height=agent_interface.rgb.height,
-                    resolution=agent_interface.rgb.resolution,
-                    scene_np=sim.np,
-                    showbase=sim,
-                )
-            )
-        if agent_interface.lidar:
-            vehicle.attach_lidar_sensor(
-                LidarSensor(
-                    vehicle=vehicle,
-                    bullet_client=sim.bc,
-                    showbase=sim,
-                    sensor_params=agent_interface.lidar.sensor_params,
-                )
-            )
-
-        vehicle.attach_via_sensor(
-            ViaSensor(
-                vehicle=vehicle,
-                mission_planner=mission_planner,
-                lane_acquisition_range=40,
-                speed_accuracy=1.5,
-            )
+        add_sensor_if_needed(
+            LanePositionSensor,
+            "lane_position_sensor",
+            condition=agent_interface.lane_positions,
         )
+        # DrivableAreaGridMapSensor
+        if agent_interface.drivable_area_grid_map:
+            if not sim.renderer_ref:
+                raise RendererException.required_to("add a drivable_area_grid_map")
+            add_sensor_if_needed(
+                DrivableAreaGridMapSensor,
+                "drivable_area_grid_map_sensor",
+                True,  # Always add this sensor
+                vehicle_state=vehicle_state,
+                width=agent_interface.drivable_area_grid_map.width,
+                height=agent_interface.drivable_area_grid_map.height,
+                resolution=agent_interface.drivable_area_grid_map.resolution,
+                renderer=sim.renderer_ref,
+            )
+        # OGMSensor
+        if agent_interface.occupancy_grid_map:
+            if not sim.renderer_ref:
+                raise RendererException.required_to("add an OGM")
+            add_sensor_if_needed(
+                OGMSensor,
+                "ogm_sensor",
+                True,  # Always add this sensor
+                vehicle_state=vehicle_state,
+                width=agent_interface.occupancy_grid_map.width,
+                height=agent_interface.occupancy_grid_map.height,
+                resolution=agent_interface.occupancy_grid_map.resolution,
+                renderer=sim.renderer_ref,
+            )
+        if agent_interface.occlusion_map:
+            if not vehicle.subscribed_to("ogm_sensor"):
+                warnings.warn(
+                    "Occupancy grid map sensor must be attached to use occlusion sensor.",
+                    category=UserWarning,
+                )
+            else:
+                add_sensor_if_needed(
+                    OcclusionMapSensor,
+                    "occlusion_map_sensor",
+                    vehicle_state=vehicle_state,
+                    width=agent_interface.occlusion_map.width,
+                    height=agent_interface.occlusion_map.height,
+                    resolution=agent_interface.occlusion_map.resolution,
+                    renderer=sim.renderer_ref,
+                    ogm_sensor=vehicle.sensor_property("ogm_sensor"),
+                    add_surface_noise=agent_interface.occlusion_map.surface_noise,
+                )
+        # RGBSensor
+        if agent_interface.top_down_rgb:
+            if not sim.renderer_ref:
+                raise RendererException.required_to("add an RGB camera")
+            add_sensor_if_needed(
+                RGBSensor,
+                "rgb_sensor",
+                True,  # Always add this sensor
+                vehicle_state=vehicle_state,
+                width=agent_interface.top_down_rgb.width,
+                height=agent_interface.top_down_rgb.height,
+                resolution=agent_interface.top_down_rgb.resolution,
+                renderer=sim.renderer_ref,
+            )
+        if len(agent_interface.custom_renders):
+            if not sim.renderer_ref:
+                raise RendererException.required_to("add a fragment program.")
+            for i, program in enumerate(agent_interface.custom_renders):
+                add_sensor_if_needed(
+                    CustomRenderSensor,
+                    f"custom_render{i}_sensor",
+                    vehicle_state=vehicle_state,
+                    width=program.width,
+                    height=program.height,
+                    resolution=program.resolution,
+                    renderer=sim.renderer_ref,
+                    fragment_shader_path=program.fragment_shader_path,
+                    render_dependencies=program.dependencies,
+                    ogm_sensor=vehicle.sensor_property("ogm_sensor", None),
+                    top_down_rgb_sensor=vehicle.sensor_property("rgb_sensor", None),
+                    drivable_area_grid_map_sensor=vehicle.sensor_property(
+                        "drivable_area_grid_map_sensor", default=None
+                    ),
+                    occlusion_map_sensor=vehicle.sensor_property(
+                        "occlusion_map_sensor", default=None
+                    ),
+                    name=program.name,
+                )
+        if agent_interface.lidar_point_cloud:
+            add_sensor_if_needed(
+                LidarSensor,
+                "lidar_sensor",
+                vehicle_state=vehicle_state,
+                sensor_params=agent_interface.lidar_point_cloud.sensor_params,
+            )
+        add_sensor_if_needed(
+            ViaSensor, "via_sensor", True, lane_acquisition_range=80, speed_accuracy=1.5
+        )
+        if agent_interface.signals:
+            add_sensor_if_needed(
+                SignalsSensor,
+                "signals_sensor",
+                lookahead=agent_interface.signals.lookahead,
+            )
+        # pytype: enable=attribute-error
 
-    def step(self, current_simulation_time):
+        for sensor_name, sensor in added_sensors:
+            if not sensor:
+                continue
+            sensor_manager.add_sensor_for_actor(vehicle.id, sensor_name, sensor)
+
+    def step(self, current_simulation_time: float):
+        """Update internal state."""
+        self._has_stepped = True
         self._chassis.step(current_simulation_time)
 
     def control(self, *args, **kwargs):
+        """Apply control values to this vehicle.
+
+        Forwards control to the chassis.
+        """
         self._chassis.control(*args, **kwargs)
 
-    def sync_to_panda3d(self):
-        pos, heading = self._chassis.pose.as_panda3d()
-        self._np.setPosHpr(*pos, heading, 0, 0)
+    def update_state(self, state: VehicleState, dt: float):
+        """Update the vehicle's state"""
+        state.updated = True
+        if state.role != ActorRole.External:
+            assert isinstance(self._chassis, BoxChassis)
+            self.control(pose=state.pose, speed=state.speed, dt=dt)
+            return
+        # External actors are "privileged", which means they work directly (bypass force application).
+        # Conceptually, this is playing 'god' with physics and should only be used
+        # to defer to a co-simulator's states.
+        linear_velocity, angular_velocity = None, None
+        if not np.allclose(
+            self._chassis.velocity_vectors[0], state.linear_velocity
+        ) or not np.allclose(self._chassis.velocity_vectors[1], state.angular_velocity):
+            linear_velocity = state.linear_velocity
+            angular_velocity = state.angular_velocity
+        if not state.dimensions.equal_if_defined(self.length, self.width, self.height):
+            self._log.warning(
+                "Unable to change a vehicle's dimensions via external_state_update()."
+            )
+        # XXX:  any way to update acceleration in pybullet?
+        self._chassis.state_override(dt, state.pose, linear_velocity, angular_velocity)
+
+    def create_renderer_node(self, renderer: RendererBase):
+        """Create the vehicle's rendering node in the renderer."""
+        return renderer.create_vehicle_node(
+            self._visual_model_path, self._id, self.vehicle_color, self.pose
+        )
+
+    # @lru_cache(maxsize=1)
+    def _warn_AckermannChassis_set_pose(self):
+        if self._has_stepped and isinstance(self._chassis, AckermannChassis):
+            logging.warning(
+                f"Agent `{self._id}` has called set pose after step."
+                "This may cause collision problems"
+            )
 
     # TODO: Merge this w/ speed setter as a set GCD call?
     def set_pose(self, pose: Pose):
+        """Use with caution. This will directly set the pose of the chassis.
+
+        This may disrupt physics simulation of the chassis physics body for a few steps after use.
+        """
+        self._warn_AckermannChassis_set_pose()
         self._chassis.set_pose(pose)
 
     def swap_chassis(self, chassis: Chassis):
-        # Apply GCD ("greatest common denominator state" from front-end to back-end)
+        """Swap the current chassis with the given chassis. Apply the GCD of the previous chassis
+        to the new chassis ("greatest common denominator state" from front-end to back-end)
+        """
         chassis.inherit_physical_values(self._chassis)
         self._chassis.teardown()
         self._chassis = chassis
 
-    def teardown(self, exclude_chassis=False):
-        for sensor in [
-            sensor
-            for sensor in [
-                self._drivable_area_grid_map_sensor,
-                self._ogm_sensor,
-                self._rgb_sensor,
-                self._lidar_sensor,
-                self._driven_path_sensor,
-            ]
-            if sensor is not None
-        ]:
-            sensor.teardown()
-
+    def teardown(self, renderer: RendererBase, exclude_chassis: bool = False):
+        """Clean up internal resources"""
         if not exclude_chassis:
             self._chassis.teardown()
-        self._np.removeNode()
+        if renderer:
+            renderer.remove_vehicle_node(self._id)
         self._initialized = False
 
-    def _meta_create_sensor_functions(self):
-        # Bit of metaprogramming to make sensor creation more DRY
-        sensor_names = [
-            "ogm_sensor",
-            "rgb_sensor",
-            "lidar_sensor",
-            "driven_path_sensor",
-            "trip_meter_sensor",
-            "drivable_area_grid_map_sensor",
-            "neighborhood_vehicles_sensor",
-            "mission_planner_sensor",
-            "waypoints_sensor",
-            "road_waypoints_sensor",
-            "accelerometer_sensor",
-            "via_sensor",
-        ]
-        for sensor_name in sensor_names:
+    def attach_sensor(self, sensor: Sensor, sensor_name: str):
+        """replace previously-attached sensor with this one
+        (to allow updating its parameters).
+        Sensors might have been attached to a non-agent vehicle
+        (for example, for observation collection from history vehicles),
+        but if that vehicle gets hijacked, we want to use the sensors
+        specified by the hijacking agent's interface."""
+        detach = getattr(self, f"detach_{sensor_name}")
+        if detach:
+            self.detach_sensor(sensor_name)
+        self._log.debug("Replaced existing %s on vehicle %s", sensor_name, self.id)
+        setattr(self, f"_{sensor_name}", sensor)
+        self._sensors[sensor_name] = sensor
 
-            def attach_sensor(self, sensor, sensor_name=sensor_name):
-                assert (
-                    getattr(self, f"_{sensor_name}", None) is None
-                ), f"{sensor_name} already added"
-                setattr(self, f"_{sensor_name}", sensor)
-                self._sensors[sensor_name] = sensor
+    def detach_sensor(self, sensor_name: str):
+        """Detach a sensor by name."""
+        self._log.debug("Removed existing %s on vehicle %s", sensor_name, self.id)
+        sensor = getattr(self, f"_{sensor_name}", None)
+        if sensor is not None:
+            setattr(self, f"_{sensor_name}", None)
+            del self._sensors[sensor_name]
+        return sensor
 
-            def detach_sensor(self, sensor_name=sensor_name):
-                sensor = getattr(self, f"_{sensor_name}", None)
-                if sensor is not None:
-                    sensor.teardown()
-                    setattr(self, f"_{sensor_name}", None)
-                    del self._sensors[sensor_name]
+    def subscribed_to(self, sensor_name: str):
+        """Confirm if the sensor is subscribed."""
+        sensor = getattr(self, f"_{sensor_name}", None)
+        return sensor is not None
 
-            def subscribed_to(self, sensor_name=sensor_name):
-                sensor = getattr(self, f"_{sensor_name}", None)
-                return sensor is not None
+    def sensor_property(
+        self,
+        sensor_name: str,
+        default: Optional[Union[Sensor, Ellipsis.__class__]] = ...,
+    ):
+        """Call a sensor by name."""
+        sensor = getattr(self, f"_{sensor_name}", None if default is ... else default)
+        assert (
+            sensor is not None or default is not ...
+        ), f"'{sensor_name}' is not attached to '{self.id}'"
+        return sensor
 
-            def sensor_property(self, sensor_name=sensor_name):
-                sensor = getattr(self, f"_{sensor_name}", None)
-                assert sensor is not None, f"{sensor_name} is not attached"
-                return sensor
+    def _meta_create_instance_sensor_functions(self):
+        for sensor_name in Vehicle._sensor_names:
+            setattr(self, f"_{sensor_name}", None)
+            setattr(
+                self,
+                f"attach_{sensor_name}",
+                partial(self.attach_sensor, sensor_name=sensor_name),
+            )
+            setattr(
+                self,
+                f"detach_{sensor_name}",
+                partial(self.detach_sensor, sensor_name=sensor_name),
+            )
 
-            setattr(Vehicle, f"_{sensor_name}", None)
-            setattr(Vehicle, f"attach_{sensor_name}", attach_sensor)
-            setattr(Vehicle, f"detach_{sensor_name}", detach_sensor)
-            setattr(Vehicle, f"subscribed_to_{sensor_name}", property(subscribed_to))
-            setattr(Vehicle, f"{sensor_name}", property(sensor_property))
+    @classmethod
+    @lru_cache(1)
+    def _meta_create_class_sensor_functions(cls):
+        for sensor_name in cls._sensor_names:
+            setattr(
+                cls,
+                f"subscribed_to_{sensor_name}",
+                property(partial(cls.subscribed_to, sensor_name=sensor_name)),
+            )
+            setattr(
+                Vehicle,
+                f"{sensor_name}",
+                property(partial(cls.sensor_property, sensor_name=sensor_name)),
+            )
 
         def detach_all_sensors_from_vehicle(vehicle):
-            for sensor_name in sensor_names:
+            sensors = []
+            for sensor_name in cls._sensor_names:
                 detach_sensor_func = getattr(vehicle, f"detach_{sensor_name}")
-                detach_sensor_func()
+                sensors.append(detach_sensor_func())
+            return sensors
 
         setattr(
-            Vehicle,
+            cls,
             "detach_all_sensors_from_vehicle",
             staticmethod(detach_all_sensors_from_vehicle),
         )
+
+    def _meta_create_sensor_functions(self):
+        # Bit of metaprogramming to make sensor creation more DRY
+        self._meta_create_instance_sensor_functions()
+        self._meta_create_class_sensor_functions()

@@ -1,0 +1,24 @@
+---
+benchmark:
+  name: "Driving SMARTS 2023.3"
+  message: |
+    For context see: 
+        - https://smarts-project.github.io/competition/2023_driving_smarts/
+        - https://codalab.lisn.upsaclay.fr/competitions/
+  eval_episodes: 50
+  shared_env_kwargs:
+    seed: 42
+    headless: True
+  envs:
+    platoon:
+      loc: "smarts.env:platoon-v0"
+      scenarios:
+        - scenarios/sumo/vehicle_following/straight_2lane_sumo_agents_1
+        - scenarios/sumo/vehicle_following/straight_2lane_sumo_t_agents_1
+        - scenarios/sumo/vehicle_following/straight_3lanes_sumo_agents_1
+        - scenarios/sumo/vehicle_following/straight_3lanes_sumo_t_agents_1
+        - scenarios/sumo/vehicle_following/straight_3lanes_sumo_t_agents_2
+        - scenarios/sumo/vehicle_following/merge_exit_sumo_agents_1
+        - scenarios/sumo/vehicle_following/merge_exit_sumo_t_agents_1
+        - scenarios/sumo/vehicle_following/merge_exit_sumo_t_agents_2
+      metric_formula: smarts/benchmark/driving_smarts/v2023/metric_formula_platoon.py

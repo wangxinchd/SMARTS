@@ -12,19 +12,29 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 import React from "react";
 import Simulation from "./simulation.js";
+import { Button } from "antd";
 
-const SimulationGroup = ({ simulationIds, client, showScores, egoView }) => {
+const SimulationGroup = ({
+  simulationIds,
+  client,
+  controlModes,
+  playingMode,
+  egoView,
+  onSelectSimulation,
+}) => {
   return (
     <div style={{ padding: "10px" }}>
       {simulationIds.map((simId) => (
-        <div
+        <Button
+          title="click the simulation to maximize"
+          onClick={(value) => onSelectSimulation((value = simId))}
           key={simId}
           style={{
             float: "left",
@@ -36,10 +46,11 @@ const SimulationGroup = ({ simulationIds, client, showScores, egoView }) => {
           <Simulation
             client={client}
             simulationId={simId}
-            showScores={showScores}
             egoView={egoView}
+            controlModes={controlModes}
+            playingMode={playingMode}
           />
-        </div>
+        </Button>
       ))}
     </div>
   );

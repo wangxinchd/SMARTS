@@ -12,7 +12,7 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -41,13 +41,13 @@ def register(locator: str, entry_point, **kwargs):
         register(
             locator="motion-planner-agent-v0",
             entry_point=lambda **kwargs: AgentSpec(
-                interface=AgentInterface(waypoints=True, action=ActionSpaceType.TargetPose),
+                interface=AgentInterface(waypoint_paths=True, action=ActionSpaceType.TargetPose),
                 agent_builder=MotionPlannerAgent,
             ),
         )
     """
 
-    agent_registry.register(locator=locator, entry_point=entry_point, **kwargs)
+    agent_registry.register(name=locator, entry_point=entry_point, **kwargs)
 
 
 def make(locator: str, **kwargs):
@@ -62,9 +62,11 @@ def make(locator: str, **kwargs):
             is in the form `{PYTHONPATH}[n]/path/to/file.py`
         kwargs:
             Additional arguments to be passed to the constructed class.
+    Returns:
+        AgentSpec: The agent specifications needed to instantiate and configure an agent.
     """
 
-    from smarts.core.agent import AgentSpec
+    from smarts.zoo.agent_spec import AgentSpec
 
     agent_spec = agent_registry.make(locator, **kwargs)
     assert isinstance(
@@ -72,3 +74,24 @@ def make(locator: str, **kwargs):
     ), f"Expected make to produce an instance of AgentSpec, got: {agent_spec}"
 
     return agent_spec
+
+
+def make_agent(locator: str, **kwargs):
+    """Create an Agent from the given agent spec locator.
+
+    In order to load a registered AgentSpec it needs to be reachable from a
+    directory contained in the PYTHONPATH.
+
+    Args:
+        locator:
+            A string in the format of 'path.to.file:locator-name' where the path
+            is in the form `{PYTHONPATH}[n]/path/to/file.py`
+        kwargs:
+            Additional arguments to be passed to the constructed class.
+    Returns:
+        Tuple[Agent, AgentInterface]: The agent and its interface.
+    """
+
+    agent_spec = make(locator, **kwargs)
+
+    return agent_spec.build_agent(), agent_spec.interface

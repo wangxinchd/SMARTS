@@ -12,7 +12,7 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -22,14 +22,17 @@ from enum import Enum
 
 # Color channel order: RGBA
 class Colors(Enum):
+    """Common simulation colors as RGBA values."""
+
     Red = (210 / 255, 30 / 255, 30 / 255, 1)
     Rose = (196 / 255, 0, 84 / 255, 1)
-    Burgundy = (127 / 255, 0, 1 / 255, 1)
+    Maroon = (128 / 255, 0, 0, 1)
     Orange = (237 / 255, 109 / 255, 0, 1)
     Yellow = (255 / 255, 190 / 255, 40 / 255, 1)
     GreenTransparent = (98 / 255, 178 / 255, 48 / 255, 0.3)
     Silver = (192 / 255, 192 / 255, 192 / 255, 1)
     Black = (0, 0, 0, 1)
+    Green = (30 / 255, 210 / 255, 30 / 255, 1)
 
     DarkBlue = (5 / 255, 5 / 255, 70 / 255, 1)
     Blue = (0, 153 / 255, 1, 1)
@@ -51,8 +54,10 @@ class Colors(Enum):
 
 
 class SceneColors(Enum):
+    """Simulation feature colors as RGBA values"""
+
     Agent = Colors.Red.value
-    SocialAgent = Colors.Silver.value
+    SocialAgent = Colors.Blue.value
     SocialVehicle = Colors.Silver.value
 
     Road = Colors.DarkGrey.value
@@ -63,15 +68,7 @@ class SceneColors(Enum):
     LaneDivider = Colors.OffWhite.value
     EdgeDivider = Colors.Yellow.value
 
-    EnvisionColors = {
-        "agent": Agent,
-        "social_agent": SocialAgent,
-        "social_vehicle": SocialVehicle,
-        "road": Road,
-        "ego_waypoint": EgoWaypoint,
-        "ego_driven_path": EgoDrivenPath,
-        "bubble_line": BubbleLine,
-        "mission_route": MissionRoute,
-        "lane_divider": LaneDivider,
-        "edge_divider": EdgeDivider,
-    }
+    SignalUnknown = Colors.Grey.value
+    SignalStop = Colors.Maroon.value
+    SignalCaution = Colors.Yellow.value
+    SignalGo = Colors.Green.value

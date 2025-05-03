@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -21,8 +21,20 @@ const wait = (ms) => {
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
 
+const frameBufferModes = {
+  NO_BIAS: 0, // randomly evict frames when buffer full
+  PRIMACY_BIAS: 1, // prefer evicting more recent frames
+  RECENCY_BIAS: 2, // more recent frames will have higher granularity
+};
+
 export default class Client {
-  constructor({ endpoint, delay = 2000, retries = Number.POSITIVE_INFINITY }) {
+  constructor({
+    endpoint,
+    delay = 2000,
+    retries = Number.POSITIVE_INFINITY,
+    maxFrameBufferSize = 10000,
+    frameBufferMode = frameBufferModes.NO_BIAS,
+  }) {
     this._endpoint = new URL(endpoint);
     this._wsEndpoint = new URL(endpoint);
     this._wsEndpoint.protocol = "ws";
@@ -31,49 +43,63 @@ export default class Client {
     this._maxRetries = retries;
     this._glb_cache = {};
 
+    this._maxFrameBufferSize = maxFrameBufferSize;
+    this._frameBufferMode = frameBufferMode;
+
     this._sockets = {};
-    this._flushStream = {};
     this._stateQueues = {};
     this._simulationSelectedTime = {};
+    this._lastSeek = null;
   }
 
   async fetchSimulationIds() {
     let url = new URL(this.endpoint);
     url.pathname = "simulations";
-    let response = await fetch(url);
-    if (!response.ok) {
-      console.error("Unable to fetch simulation IDs");
+    try {
+      let response = await fetch(url);
+      if (!response.ok) {
+        console.error("Unable to fetch simulation IDs");
+        return [];
+      } else {
+        let data = await response.json();
+        return data.simulations;
+      }
+    } catch (error) {
       return [];
-    } else {
-      let data = await response.json();
-      return data.simulations;
     }
   }
 
   seek(simulationId, seconds) {
+    if (this._lastSeek != null) {
+      return;
+    }
+
     if (!(simulationId in this._sockets)) {
       this._sockets[simulationId] = null;
     }
 
-    if (!(simulationId in this._flushStream)) {
-      this._flushStream[simulationId] = false;
-    }
-
     if (
-      !this._sockets[simulationId] &&
-      this._sockets[simulationId].readyState == WebSocket.OPEN
+      !this._sockets[simulationId] ||
+      !(this._sockets[simulationId].readyState == WebSocket.OPEN)
     ) {
       console.warn("Unable to seek because no connected socket exists");
       return;
     }
 
-    this._sockets[simulationId].send(JSON.stringify({ seek: seconds }));
-    this._flushStream[simulationId] = true;
+    this._lastSeek = new Promise((resolve) =>
+      resolve(
+        this._sockets[simulationId].send(JSON.stringify({ seek: seconds })),
+      ),
+    )
+      .then(wait(500))
+      .finally(() => {
+        this._lastSeek = null;
+        console.log("Seek complete");
+      });
   }
 
   async _obtainStream(simulationId, stateQueue, remainingRetries) {
-    let self = this;
-    let url = new URL(self._wsEndpoint);
+    let url = new URL(this._wsEndpoint);
     url.pathname = `simulations/${simulationId}/state`;
 
     try {
@@ -89,27 +115,77 @@ export default class Client {
         };
 
         socket.onmessage = (event) => {
-          let data = JSON.parse(event.data);
-          let state = JSON.parse(data.state, (_, value) =>
-            value === "NaN"
-              ? Nan
-              : value === "Infinity"
-              ? Infinity
-              : value === "-Infinity"
-              ? -Infinity
-              : value
-          );
-          stateQueue.push({
-            state: state,
-            current_elapsed_time: data.current_elapsed_time,
-            total_elapsed_time: data.total_elapsed_time,
-          });
+          let frames = JSON.parse(event.data);
+          for (const frame of frames) {
+            let state = JSON.parse(frame.state, (_, value) =>
+              value === "NaN"
+                ? Nan
+                : value === "Infinity"
+                  ? Infinity
+                  : value === "-Infinity"
+                    ? -Infinity
+                    : value,
+            );
+            if (
+              stateQueue.length > 0 &&
+              frame.current_elapsed_time <
+                stateQueue[stateQueue.length - 1].current_elapsed_time
+            ) {
+              // if it's moved back in time, it was from a seek and we're now
+              // going to receive those frames again, so flush.
+              stateQueue.length = 0;
+            } else if (stateQueue.length > this._maxFrameBufferSize) {
+              // the following is a placeholder to protect us
+              // until we revisit the architecture, at which point
+              // different policies can be implemented here.  for example,
+              // we might eventually want this to depend on the playback mode,
+              // or on events that happened in the simulation (although that
+              // would require upstream support).  We might also want to
+              // dump frames to a local file rather than just evicting them.
+              switch (this._frameBufferMode) {
+                case frameBufferModes.RECENCY_BIAS: {
+                  // evenly thin out older frames to allow granular newer frames...
+                  // (each time this is done, the earliest frames will get even thinner.)
+                  // This allows for a "fast-forward-like catch up" to the most
+                  // recent events in the simulation (when not in near-real-time
+                  // playing mode).
+                  stateQueue = stateQueue.filter(
+                    (frame, ind) => ind % 2 == 0 && ind > 5,
+                  );
+                  self._stateQueues[simulationId] = stateQueue;
+                  break;
+                }
+                case frameBufferModes.PRIMACY_BIAS: {
+                  // newer frames have a higher probability of being evicted...
+                  let removeIndex = Math.floor(
+                    stateQueue.length * Math.sqrt(Math.random()),
+                  );
+                  stateQueue.splice(removeIndex, 1);
+                  break;
+                }
+                case frameBufferModes.NO_BIAS:
+                default: {
+                  // randomly choose a frame to remove...
+                  // spread the degradation randomly throughout the history.
+                  let removeIndex = Math.floor(
+                    stateQueue.length * Math.random(),
+                  );
+                  stateQueue.splice(removeIndex, 1);
+                }
+              }
+            }
+            stateQueue.push({
+              state: state,
+              current_elapsed_time: frame.current_elapsed_time,
+              total_elapsed_time: frame.total_elapsed_time,
+            });
+          }
         };
 
         socket.onerror = (error) => {
           console.warn(
             `Socket encountered error=${error.message} ` +
-              `trying to connect to endpoint=${url}`
+              `trying to connect to endpoint=${url}`,
           );
           reject(error);
         };
@@ -118,15 +194,15 @@ export default class Client {
     } catch (error) {
       if (remainingRetries === 0) throw error;
       console.info(
-        `Retrying connection, attempts remaining=${remainingRetries}`
+        `Retrying connection, attempts remaining=${remainingRetries}`,
       );
 
       remainingRetries -= 1;
-      await wait(self._delay);
-      return await self._obtainStream(
+      await wait(this._delay);
+      return await this._obtainStream(
         simulationId,
         stateQueue,
-        remainingRetries
+        remainingRetries,
       );
     }
   }
@@ -134,10 +210,6 @@ export default class Client {
   async *worldstate(simulationId) {
     if (!(simulationId in this._sockets)) {
       this._sockets[simulationId] = null;
-    }
-
-    if (!(simulationId in this._flushStream)) {
-      this._flushStream[simulationId] = false;
     }
 
     if (!(simulationId in this._stateQueues)) {
@@ -155,13 +227,8 @@ export default class Client {
 
       if (isConnected) {
         while (this._stateQueues[simulationId].length > 0) {
-          if (this._flushStream[simulationId]) {
-            this._flushStream[simulationId] = false;
-            this._stateQueues[simulationId].length = 0;
-            continue;
-          }
-
-          let item = this._stateQueues[simulationId].pop();
+          // Removes the oldest element
+          let item = this._stateQueues[simulationId].shift();
           let elapsed_times = [
             item.current_elapsed_time,
             item.total_elapsed_time,
@@ -172,7 +239,7 @@ export default class Client {
         this._sockets[simulationId] = await this._obtainStream(
           simulationId,
           this._stateQueues[simulationId],
-          this._maxRetries
+          this._maxRetries,
         );
       }
 

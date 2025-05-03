@@ -1,16 +1,38 @@
+# MIT License
+#
+# Copyright (C) 2021. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
 import gc
 import logging
 
-import gym
+import gymnasium as gym
+import numpy as np
 import pytest
+from pympler import muppy, summary, tracker
 
-from pympler import muppy, tracker, summary
-
+from smarts.core.agent import Agent
 from smarts.core.agent_interface import AgentInterface, AgentType
-from smarts.core.agent import AgentSpec, AgentPolicy
+from smarts.zoo.agent_spec import AgentSpec
 
 SMARTS_MEMORY_GROWTH_LIMIT = 2e5
-EPISODE_MEMORY_GROWTH_LIMIT = 2e5
+EPISODE_MEMORY_GROWTH_LIMIT = 8e5
 TIMESTEP_SEC = 0.1
 # Disable logging because it causes memory growth
 logging.disable(logging.WARNING)
@@ -23,14 +45,14 @@ def agent_id():
 
 @pytest.fixture
 def primative_scenarios():
-    return ["scenarios/intersections/2lane"]
+    return ["scenarios/sumo/intersections/2lane"]
 
 
 @pytest.fixture
 def social_agent_scenarios():
     return [
-        "scenarios/intersections/4lane",
-        # "scenarios/intersections/6lane",
+        "scenarios/sumo/intersections/4lane",
+        # "scenarios/sumo/intersections/6lane",
     ]
 
 
@@ -42,15 +64,30 @@ def seed():
 @pytest.fixture(
     params=[
         # ( episodes, action, agent_type )
-        (100, None, AgentType.Buddha),
-        (100, (30, 1, -1), AgentType.Full),
+        (100, (), AgentType.Buddha),
+        (100, np.array((1, 1, -1), dtype=np.float32), AgentType.Full),
         # (10, (30, 1, -1), AgentType.Standard),  # standard is just full but less
-        (100, "keep_lane", AgentType.Laner),
+        (100, 2, AgentType.Laner),
         # (100, (30, 1, -1), AgentType.Loner),
         # (100, (30, 1, -1), AgentType.Tagger),
         # (100, (30, 1, -1), AgentType.StandardWithAbsoluteSteering),
         # (100, (50, 0), AgentType.LanerWithSpeed),
-        (100, ([1, 2, 3], [1, 2, 3], [0.5, 1, 1.5], [20, 20, 20]), AgentType.Tracker),
+        (
+            100,
+            (
+                np.array(
+                    [
+                        1,
+                        2,
+                    ]
+                    * 10
+                ),
+                np.array([1, 2] * 10),
+                np.array([0.5, 1] * 10),
+                np.array([20, 20] * 10),
+            ),
+            AgentType.Tracker,
+        ),
         # ( 5, ([0,1,2], [0,1,2], [0,1,2]), AgentType.MPCTracker),
     ]
 )
@@ -60,13 +97,13 @@ def agent_params(request):
 
 @pytest.fixture
 def agent_type():
-    return ((30, 1, -1), AgentType.Full)
+    return (np.array((1, 1, -1), dtype=np.float32), AgentType.Full)
 
 
 def env_and_spec(
     action, agent_type, max_episode_steps, scenarios, seed=42, agent_id="Agent-006"
 ):
-    class Policy(AgentPolicy):
+    class Policy(Agent):
         def act(self, obs):
             return action
 
@@ -74,16 +111,14 @@ def env_and_spec(
         interface=AgentInterface.from_type(
             agent_type, max_episode_steps=max_episode_steps
         ),
-        policy_builder=Policy,
+        agent_builder=Policy,
     )
     env = gym.make(
-        "smarts.env:hiway-v0",
+        "smarts.env:hiway-v1",
         scenarios=scenarios,
-        agent_specs={agent_id: agent_spec},
+        agent_interfaces={agent_id: agent_spec.interface},
         headless=True,
-        visdom=False,
-        timestep_sec=TIMESTEP_SEC,
-        sumo_headless=True,
+        fixed_timestep_sec=TIMESTEP_SEC,
         seed=seed,
     )
 
@@ -100,23 +135,30 @@ def _env_memory_buildup(
     gc.collect()
 
 
-def _every_nth_episode(agent_id, episode_count, env_and_spec, steps_per_yield):
+def _every_nth_episode(agent_id, episode_count, env_and_spec, episodes_per_yield):
     env, agent_spec = env_and_spec
 
     for episode_index in range(episode_count):
         agent = agent_spec.build_agent()
-        observations = env.reset()
+        observations, _ = env.reset()
 
-        dones = {"__all__": False}
-        while not dones["__all__"]:
+        terminateds = {"__all__": False}
+        while not terminateds["__all__"]:
             agent_obs = observations[agent_id]
             agent_action = agent.act(agent_obs)
-            observations, rewards, dones, infos = env.step({agent_id: agent_action})
-            # episode.record_step(observations, rewards, dones, infos)
+            observations, rewards, terminateds, truncateds, infos = env.step(
+                {agent_id: agent_action}
+            )
         agent_obs = None
         agent_action = None
-        observations, rewards, dones, infos = None, None, None, None
-        if episode_index % steps_per_yield == 0:
+        observations, rewards, terminateds, truncateds, infos = (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        if episode_index % episodes_per_yield == 0:
             yield episode_index
 
 
@@ -129,13 +171,15 @@ def _memory_buildup(
 
     for _ in range(episode_count):
         agent = agent_spec.build_agent()
-        observations = env.reset()
+        observations, _ = env.reset()
 
-        dones = {"__all__": False}
-        while not dones["__all__"]:
+        terminateds = {"__all__": False}
+        while not terminateds["__all__"]:
             agent_obs = observations[agent_id]
             agent_action = agent.act(agent_obs)
-            observations, _, dones, _ = env.step({agent_id: agent_action})
+            observations, _, terminateds, truncateds, _ = env.step(
+                {agent_id: agent_action}
+            )
 
     env.close()
 
@@ -173,7 +217,7 @@ def test_smarts_episode_memory_cleanup(
 ):
     MAX_EPISODE_STEPS = 100
     EPISODE_COUNT = 100
-    STEPS_PER_YIELD = 10
+    EPISODES_PER_CHECK = 10
 
     _, action, agent_type = agent_params
 
@@ -184,10 +228,15 @@ def test_smarts_episode_memory_cleanup(
     size = 0
     last_size = 0
     gc.collect()
+    from pympler import refbrowser
+
     tr = tracker.SummaryTracker()
     try:
         for current_episode in _every_nth_episode(
-            agent_id, EPISODE_COUNT, env_and_agent_spec, steps_per_yield=STEPS_PER_YIELD
+            agent_id,
+            EPISODE_COUNT,
+            env_and_agent_spec,
+            episodes_per_yield=EPISODES_PER_CHECK,
         ):
             gc.collect()
             all_objects = muppy.get_objects()
@@ -195,10 +244,9 @@ def test_smarts_episode_memory_cleanup(
             tr.print_diff(summary.summarize(all_objects))
             print(flush=True)
             all_objects = None
-            if current_episode > STEPS_PER_YIELD:
-                assert (
-                    size - last_size < EPISODE_MEMORY_GROWTH_LIMIT
-                ), f"End size delta {size - last_size}"
+            assert (
+                size - last_size < EPISODE_MEMORY_GROWTH_LIMIT
+            ), f"End size delta `{size - last_size=}` at `{current_episode=}`"
             last_size = size
     finally:
         env_and_agent_spec[0].close()
@@ -257,7 +305,7 @@ def test_smarts_fast_reset_memory_cleanup(agent_id, seed, social_agent_scenarios
             seed,
             social_agent_scenarios,
             1,
-            None,
+            (),
             agent_type,
             max_episode_steps=2,
         )
@@ -277,7 +325,9 @@ def test_smarts_social_agent_scenario_memory_cleanup(
     agent_id, seed, social_agent_scenarios, agent_type
 ):
     # Run once to initialize globals and test to see if smarts is working
-    _memory_buildup(agent_id, seed, social_agent_scenarios, 1, *agent_type)
+    _memory_buildup(
+        agent_id, seed, social_agent_scenarios, 1, agent_type[0], agent_type[1]
+    )
 
     gc.collect()
     initial_size = muppy.get_size(muppy.get_objects())

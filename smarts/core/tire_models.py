@@ -12,7 +12,7 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -24,6 +24,8 @@ import numpy as np
 
 
 class TireForces:
+    """Tire forces utility"""
+
     def __init__(self, stiffness, road_friction):
         self.c_alpha_front, self.c_alpha_rear, self.c_x_front, self.c_x_rear = stiffness
         self.road_friction = road_friction
@@ -94,19 +96,29 @@ class TireForces:
             for wheel_id in [2, 4, 5, 6]
         ]
 
+        z_yaw = chassis.velocity_vectors[1][2]
         # 0.1 is the threshold for speed of the center of wheel
-        # to activate slip angle caluclation.
+        # to activate slip angle calculation.
         for i in range(4):
             if abs(abs_speed_corners[i]) > 0.1:
 
                 corner_speed = plane_speed_vector + np.cross(
-                    np.array([0, 0, chassis.yaw_rate[2]]), relative_corner_vector[i]
+                    np.array([0, 0, z_yaw]), relative_corner_vector[i]
                 )
                 slip_angles[i] = steering_angles_corners[i] - (
-                    (math.atan2(corner_speed[1], corner_speed[0],))
+                    (
+                        math.atan2(
+                            corner_speed[1],
+                            corner_speed[0],
+                        )
+                    )
                 )
 
         return slip_angles
+
+    def apply_tire_forces(self, chassis, client, action):
+        """Applies tire forces"""
+        raise NotImplementedError
 
     @staticmethod
     def _calculate_slip_ratios(chassis, client, action):
@@ -146,6 +158,7 @@ class TireForces:
 
     @staticmethod
     def build_tire_model(stiffness, tire_model_type, road_friction):
+        """Generates the requested tire model."""
         if tire_model_type == "LinearTireforce(wheel)":
             return LinearTireForces(stiffness, road_friction)
         elif tire_model_type == "LinearTireforce(contact)":
@@ -159,6 +172,8 @@ class TireForces:
 
 
 class LinearTireForces(TireForces):
+    """A linear forces implementation of a tire model."""
+
     def _calculate_tire_forces(self, chassis, client, action):
 
         tire_angles = self._calculate_tire_angles(chassis, client, action)
@@ -229,7 +244,7 @@ class LinearTireForces(TireForces):
         return (forces, lat_forces, lon_forces)
 
     def apply_tire_forces(self, chassis, client, action):
-
+        """Applies linear tire forces"""
         wheel_index = [2, 4, 5, 6]
         wheel_positions = [
             np.array(client.getLinkState(chassis.bullet_id, wheel_idx)[0])
@@ -256,16 +271,19 @@ class LinearTireForces(TireForces):
         return (lat_forces, lon_forces)
 
 
-# TODO: Implement tire forces at contact points
 class LinearTireForcesContact(TireForces):
+    """TODO: Implement tire forces at contact points"""
+
     pass
 
 
-# TODO: Implement nonlinear tire forces
 class NonlinearTireForces(TireForces):
+    """TODO: Implement nonlinear tire forces"""
+
     pass
 
 
-# TODO: Implement nonlinear tire forces at contact points
 class NonlinearTireForcesContact(TireForces):
+    """TODO: Implement nonlinear tire forces at contact points"""
+
     pass

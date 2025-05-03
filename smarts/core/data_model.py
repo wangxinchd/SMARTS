@@ -12,28 +12,34 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-from dataclasses import dataclass, field
-from typing import Dict, Any
+from __future__ import annotations
 
-from smarts.core.agent import AgentSpec
-from smarts.sstudio.types import Mission
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
 from smarts.zoo.registry import make
+
+if TYPE_CHECKING:
+    from smarts.zoo.agent_spec import AgentSpec
 
 
 @dataclass
 class SocialAgent:
+    """A serializable representation of a social agent."""
+
     id: str
-    name: str
+    actor_name: str
     is_boid: bool
     is_boid_keep_alive: bool
     agent_locator: str
     policy_kwargs: Dict[str, Any] = field(default_factory=dict)
-    initial_speed: float = None
+    initial_speed: Optional[float] = None
 
     def to_agent_spec(self) -> AgentSpec:
+        """Generate an agent spec."""
         return make(locator=self.agent_locator, **self.policy_kwargs)

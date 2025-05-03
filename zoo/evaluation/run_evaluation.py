@@ -1,19 +1,18 @@
-import os
-import sys
-import yaml
-import glob
-import shutil
-import pickle
-import tempfile
 import argparse
+import glob
+import os
+import pickle
+import shutil
 import subprocess
-from pathlib import Path
+import sys
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
+import yaml
 from rich.console import Console
 
-from smarts.sstudio.types import SocialAgentActor
-
+from smarts.sstudio.sstypes import SocialAgentActor
 
 console = Console()
 
@@ -48,7 +47,7 @@ def python(command):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-    except Exception as e:
+    except subprocess.CalledProcessError as e:
         console.print(e.output.decode("utf-8"))
         exit(e.returncode)
 
@@ -111,7 +110,7 @@ def build_scenario(agent_name, actor, scenario_path):
         except OSError as e:
             console.print(e)
             exit(1)
-        except Exception as e:
+        except subprocess.CalledProcessError as e:
             console.print(e.output.decode("utf-8"))
             exit(e.returncode)
 
@@ -177,11 +176,14 @@ def evaluate_agents_on_scenario(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        prog="evaluation", description="Evaluation script for agent diversity.",
+        prog="evaluation",
+        description="Evaluation script for agent diversity.",
     )
 
     parser.add_argument(
-        "batch_yaml", help="The path to the run batch yaml file.", type=str,
+        "batch_yaml",
+        help="The path to the run batch yaml file.",
+        type=str,
     )
 
     args = parser.parse_args()

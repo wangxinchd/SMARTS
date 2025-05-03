@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -29,10 +29,12 @@ import html2canvas from "html2canvas";
 import { RecordRTCPromisesHandler, invokeSaveAsDialog } from "recordrtc";
 import { Layout } from "antd";
 const { Content } = Layout;
-import Header from "./header";
+import Header, { PLAYMODES } from "./header";
 import Simulation from "./simulation";
 import SimulationGroup from "./simulation_group";
+import { attrs, agentModes } from "./control_panel";
 import PlaybackBar from "./playback_bar";
+import ControlPanel from "./control_panel.js";
 import { useToasts } from "react-toast-notifications";
 import transcode from "../helpers/transcode";
 
@@ -41,31 +43,56 @@ window.html2canvas = html2canvas;
 
 function App({ client }) {
   const [simulationIds, setSimulationIds] = useState([]);
-  const [showScores, setShowScores] = useState(true);
+  const [showControls, setShowControls] = useState(true);
+  const [controlModes, setControlModes] = useState({
+    [attrs.score]: true,
+    [attrs.speed]: false,
+    [attrs.position]: false,
+    [attrs.heading]: false,
+    [attrs.laneId]: false,
+    [agentModes.socialObs]: true,
+  });
   const [egoView, setEgoView] = useState(false);
   const [currentElapsedTime, setCurrentElapsedTime] = useState(0);
   const [totalElapsedTime, setTotalElapsedTime] = useState(1);
+  const [playing, setPlaying] = useState(true);
+  const [playingMode, setPlayingMode] = useState(PLAYMODES.near_real_time);
   const simulationCanvasRef = useRef(null);
   const recorderRef = useRef(null);
   const { addToast } = useToasts();
   const history = useHistory();
+  const [totalSimIds, setTotalSimIds] = useState(0);
+
+  let getSimIdsLength = async () => {
+    let ids = await client.fetchSimulationIds();
+    if (ids.length != totalSimIds) setTotalSimIds(ids.length);
+  };
+  // setInterval(getSimIdsLength, 3000);
 
   // also includes all
   const routeMatch = useRouteMatch("/:simulation");
   const matchedSimulationId = routeMatch ? routeMatch.params.simulation : null;
 
+  const wait = (ms) => {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  };
+
   useEffect(() => {
     (async () => {
-      let ids = await client.fetchSimulationIds();
-      if (ids.length > 0) {
-        if (!matchedSimulationId || !ids.includes(matchedSimulationId)) {
-          history.push(`/${ids[0]}`);
+      let ids = [];
+      while (true) {
+        ids = await client.fetchSimulationIds();
+        if (ids.length > 0) {
+          if (!matchedSimulationId || !ids.includes(matchedSimulationId)) {
+            history.push(`/${ids[ids.length - 1]}`);
+          }
+          break;
         }
+        await wait(1000);
       }
-
       setSimulationIds(ids);
     })();
-  }, []);
+  }, [totalSimIds]);
 
   async function onStartRecording() {
     recorderRef.current = new RecordRTCPromisesHandler(
@@ -73,7 +100,7 @@ function App({ client }) {
       {
         type: "canvas",
         mimeType: "video/webm;codecs=h264",
-      }
+      },
     );
     await recorderRef.current.startRecording();
   }
@@ -87,7 +114,7 @@ function App({ client }) {
     let outputBlob = await transcode(blob, onMessage);
     invokeSaveAsDialog(
       outputBlob,
-      `envision-${Math.round(Date.now() / 1000)}.mp4`
+      `envision-${Math.round(Date.now() / 1000)}.mp4`,
     );
   }
 
@@ -95,15 +122,23 @@ function App({ client }) {
     history.push(`/${simulationId}`);
   }
 
+  function toggleControlModes(attr) {
+    setControlModes((prevMode) => ({
+      ...prevMode,
+      ...attr,
+    }));
+  }
+
   return (
     <Layout className="layout" style={{ width: "100%", height: "100%" }}>
       <Header
         simulationIds={simulationIds}
+        onSelectPlayingMode={setPlayingMode}
         matchedSimulationId={matchedSimulationId}
         onSelectSimulation={onSelectSimulation}
         onStartRecording={onStartRecording}
         onStopRecording={onStopRecording}
-        onToggleShowScores={(show) => setShowScores(show)}
+        onToggleShowControls={(show) => setShowControls(show)}
         onToggleEgoView={(view) => setEgoView(view)}
       />
       <Content>
@@ -112,8 +147,10 @@ function App({ client }) {
             <SimulationGroup
               client={client}
               simulationIds={simulationIds}
-              showScores={showScores}
+              controlModes={controlModes}
+              playingMode={playingMode}
               egoView={egoView}
+              onSelectSimulation={onSelectSimulation}
             />
           </Route>
           <Route
@@ -128,18 +165,32 @@ function App({ client }) {
                     flexDirection: "column",
                   }}
                 >
-                  <Simulation
-                    canvasRef={simulationCanvasRef}
-                    client={client}
-                    simulationId={matchedSimulationId}
-                    showScores={showScores}
-                    egoView={egoView}
-                    onElapsedTimesChanged={(current, total) => {
-                      setCurrentElapsedTime(current);
-                      setTotalElapsedTime(total);
+                  <div
+                    style={{
+                      display: "flex",
+                      flex: 1,
+                      flexDirection: "row",
                     }}
-                    style={{ flex: "1" }}
-                  />
+                  >
+                    <ControlPanel
+                      showControls={showControls}
+                      toggleControlModes={toggleControlModes}
+                    />
+                    <Simulation
+                      canvasRef={simulationCanvasRef}
+                      client={client}
+                      simulationId={matchedSimulationId}
+                      controlModes={controlModes}
+                      egoView={egoView}
+                      onElapsedTimesChanged={(current, total) => {
+                        setCurrentElapsedTime(current);
+                        setTotalElapsedTime(total);
+                      }}
+                      style={{ flex: "1" }}
+                      playing={playing}
+                      playingMode={playingMode}
+                    />
+                  </div>
                   <PlaybackBar
                     currentTime={currentElapsedTime}
                     totalTime={totalElapsedTime}
@@ -148,6 +199,8 @@ function App({ client }) {
                       client.seek(matchedSimulationId, seconds);
                     }}
                     style={{ height: "80px" }}
+                    playing={playing}
+                    setPlaying={setPlaying}
                   />
                 </div>
               );

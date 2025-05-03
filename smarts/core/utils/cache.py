@@ -12,15 +12,15 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 import functools
-from typing import Any
-from types import FunctionType
 from threading import RLock
+from types import FunctionType
+from typing import Any
 
 _CACHE_KEY_PREFIX = "_cache_decorator"
 
@@ -101,14 +101,18 @@ class _CacheCallable:
         return cached[key]
 
     def clear_cache(self):
+        """Clear the instance cache."""
         _CacheCallable.external_clear_cache(self._instance, self._cache_key)
 
     @staticmethod
     def external_clear_cache(instance, cache_key):
+        """Clears the cache on the given instance."""
         setattr(instance, cache_key, {})
 
 
 class cache:
+    """A caching decorator."""
+
     def __init__(self, method: FunctionType):
         self._method = method
         self._cache_key = f"{_CACHE_KEY_PREFIX}_{method.__name__}"
@@ -119,6 +123,8 @@ class cache:
 
 
 def clear_cache(func):
+    """A decorator that clears `@cache` type caches."""
+
     def _clear_caches(self):
         for key in self.__dict__:
             if key.startswith(_CACHE_KEY_PREFIX):

@@ -1,101 +1,92 @@
-.. _set_up_smarts:
+.. _setup:
 
-Setting up SMARTS
-=================
+Setup
+=====
 
-==========
-First Steps
-==========
+Demo Video
+----------
 
-To setup the simulator, which is called SMARTS, run the following commands,
+.. raw:: html
 
-.. code-block:: bash
+    <video controls="controls" width="640">
+        <source src="https://raw.githubusercontent.com/smarts-project/smarts-project.github.io/master/assets/demo.mp4" type="video/mp4" />
+    </video>
 
-    # git clone ...
-    cd <project>
+Prerequisites
+-------------
 
-    # Follow the instructions given by prompt for setting up the SUMO_HOME environment variable
-    ./install_deps.sh
++ ``python3 (3.8, 3.9, 3.10, 3.11)``
++ ``ubuntu (>=16.04)``
 
-    # verify sumo is >= 1.5.0
-    # if you have issues see ./doc/SUMO_TROUBLESHOOTING.md
-    sumo
+Installation
+------------
 
-    # setup virtual environment; presently only Python 3.7.x is officially supported
-    python3.7 -m venv .venv
+Package
+^^^^^^^
 
-    # enter virtual environment to install all dependencies
-    source .venv/bin/activate
-
-    # upgrade pip, a recent version of pip is needed for the version of tensorflow we depend on
-    pip install --upgrade pip
-
-    # install [train] version of python package with the rllib dependencies
-    pip install -e .[train]
-
-    # make sure you can run tests (and verify they are passing)
-    make test
-
-    # then you can run a scenario, see following section for more details
-
-================
-Common Questions
-================
-
-1. Exception: Could not open window.
-
-This may be due to some old dependencies of Panda3D. Try the following instructions to solve it.
+This includes SMARTS but none of the examples.
 
 .. code-block:: bash
 
-    # set DISPLAY 
-    vim ~/.bashrc
-    export DISPLAY=":1"
-    source ~/.bashrc
+    # For Mac OS X users, ensure XQuartz is pre-installed.
+    # Install the system requirements. You may use the `-y` option to enable
+    # automatic assumption of "yes" to all prompts to avoid timeout from 
+    # waiting for user input. 
+    $ bash utils/setup/install_deps.sh
 
-    # set xorg server
-    sudo wget -O /etc/X11/xorg.conf http://xpra.org/xorg.conf
-    sudo /usr/bin/Xorg -noreset +extension GLX +extension RANDR +extension RENDER -logfile ./xdummy.log -config /etc/X11/xorg.conf $DISPLAY & 0
+    # This should install the latest version of SMARTS from package index (generally PyPI).
+    $ pip install 'smarts[camera-obs,sumo,examples]'
 
-====
-Docs
-====
 
-To look at the documentation call:
+Development
+^^^^^^^^^^^
 
-.. code-block:: bash
-
-    # Browser will attempt to open on localhost:8082
-    scl docs
-
-========
-CLI Tool
-========
-
-SMARTS provides a command-line tool to interact with scenario studio and Envision.
-
-Usage
+Run the following commands to setup the SMARTS simulator.
 
 .. code-block:: bash
 
-    scl COMMAND SUBCOMMAND [OPTIONS] [ARGS]...
+    $ git clone https://github.com/huawei-noah/SMARTS.git
+    $ cd <path/to/SMARTS>
 
-Commands:
+    # For latest stable release
+    $ git checkout tags/<tag_name>
+    # e.g., git checkout tags/v1.0.3
 
-- envision
-- scenario
-- zoo
+.. note::
 
-Subcommands of scenario:
+    Alternatively, to use the current development (i.e., bleeding edge) version:
 
-- build-all: Generate all scenarios under the given directories
-- build: Generate a single scenario
-- clean: Clean generated artifacts
+    .. code-block:: bash
 
-Subcommands of envision:
+        $ git checkout master
 
-- start: Start envision server
+.. code-block:: bash
 
-Subcommands of zoo:
+    # For Mac OS X users, ensure XQuartz is pre-installed.
+    # Install the system requirements. You may use the `-y` option to enable
+    # automatic assumption of "yes" to all prompts to avoid timeout from 
+    # waiting for user input. 
+    $ bash utils/setup/install_deps.sh
 
-- build: Build a policy
+    # Setup virtual environment. Presently at least Python 3.8 and higher is
+    # officially supported.
+    $ python3.8 -m venv .venv
+
+    # Enter virtual environment to install dependencies.
+    $ source .venv/bin/activate
+
+    # Upgrade pip.
+    $ pip install --upgrade pip
+
+    # Install smarts with extras as needed. Extras include the following: 
+    # `camera-obs` - needed for rendering camera observations, and for testing.
+    # `sumo` - needed for using SUMO scenarios.
+    # `test` - needed for running tests.
+    # `example` - needed for running examples.
+    # `--config-settings editable_mode=strict` - may be needed depending on version of setuptools. 
+    #      See https://github.com/huawei-noah/SMARTS/issues/2090.
+    $ pip install -e '.[camera-obs,sumo,test,examples]' --config-settings editable_mode=strict
+
+    # Run sanity-test and verify they are passing.
+    # If tests fail, check './sanity_test_result.xml' for test report. 
+    $ make sanity-test

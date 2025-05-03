@@ -1,6 +1,5 @@
-from setuptools import setup
-
 from rl_agent import VERSION
+from setuptools import setup
 
 setup(
     name="rl-agent",
@@ -8,5 +7,5 @@ setup(
     version=VERSION,
     packages=["rl_agent"],
     include_package_data=True,
-    install_requires=["tensorflow==1.15", "smarts"],
+    install_requires=["smarts>=0.6.0", "tensorflow==2.4", "ray[rllib]==1.0.1.post1"],
 )

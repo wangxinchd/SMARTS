@@ -12,32 +12,33 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-import random
-import psutil
+from __future__ import annotations
+
 import itertools
+import random
+from typing import TYPE_CHECKING, List, Sequence, Tuple
 
 import numpy as np
-from panda3d.core import Quat
+import psutil
 
 from .utils import pybullet
-from .utils.pybullet import bullet_client as bc
+from .utils.core_math import batches, rotate_quat
 
-from .lidar_sensor_params import SensorParams
-from .utils.math import batches
+if TYPE_CHECKING:
+    from .lidar_sensor_params import SensorParams
 
 
 class Lidar:
-    def __init__(
-        self, origin, sensor_params: SensorParams, bullet_client: bc.BulletClient
-    ):
+    """Lidar utilities."""
+
+    def __init__(self, origin, sensor_params: SensorParams):
         self._origin = origin
         self._sensor_params = sensor_params
-        self._bullet_client = bullet_client
         self._n_threads = psutil.cpu_count(logical=False)
 
         # As an optimization we compute a set of "base rays" once and shift translate
@@ -45,8 +46,12 @@ class Lidar:
         self._base_rays = None
         self._static_lidar_noise = self._compute_static_lidar_noise()
 
+    def __eq__(self, __value: object) -> bool:
+        return isinstance(__value, Lidar) and ((self._origin == __value._origin).all())
+
     @property
     def origin(self):
+        """The center of the emission point of the lidar lasers."""
         return self._origin
 
     @origin.setter
@@ -67,11 +72,17 @@ class Lidar:
                     self._sensor_params.noise_mu, self._sensor_params.noise_sigma
                 )
             )
-        return np.array(static_lidar_noise, dtype=np.float)
+        return np.array(static_lidar_noise, dtype=np.float64)
 
-    def compute_point_cloud(self):
+    def compute_point_cloud(
+        self, bullet_client
+    ) -> Tuple[List[np.ndarray], List[int], List[Tuple[np.ndarray, np.ndarray]]]:
+        """Generate a point cloud.
+        Returns:
+            Point cloud of 3D points, a list of hit objects, a list of rays fired.
+        """
         rays = self._compute_rays()
-        point_cloud, hits = self._trace_rays(rays)
+        point_cloud, hits = self._trace_rays(rays, bullet_client)
         # point_cloud = self._apply_noise(point_cloud)
         assert (
             len(point_cloud) == len(hits) == len(rays) == len(self._static_lidar_noise)
@@ -86,13 +97,15 @@ class Lidar:
                 / self._sensor_params.angle_resolution
             )
 
-            yaws = -self._sensor_params.laser_angles
+            yaws = -1 * self._sensor_params.laser_angles
             rolls = np.arange(n_rays) * self._sensor_params.angle_resolution
+            origin = np.array([0, 0, 0])
             for yaw, roll in itertools.product(yaws, rolls):
                 rot = pybullet.getQuaternionFromEuler((roll, 0, yaw))
-                origin = np.array([0, 0, 0])
-                direction = np.array(
-                    Quat(rot).xform((0, self._sensor_params.max_distance, 0))
+
+                direction = rotate_quat(
+                    np.asarray(rot, dtype=float),
+                    np.asarray((0, self._sensor_params.max_distance, 0), dtype=float),
                 )
                 self._base_rays.append((origin, direction))
 
@@ -102,14 +115,14 @@ class Lidar:
         ]
         return rays
 
-    def _trace_rays(self, rays):
+    def _trace_rays(self, rays, bullet_client):
         results = []
         for batched_rays in batches(
             rays, int(pybullet.MAX_RAY_INTERSECTION_BATCH_SIZE - 1)
         ):
             origins, directions = zip(*batched_rays)
             results.extend(
-                self._bullet_client.rayTestBatch(origins, directions, self._n_threads)
+                bullet_client.rayTestBatch(origins, directions, self._n_threads)
             )
 
         hit_ids, _, _, positions, _ = zip(*results)

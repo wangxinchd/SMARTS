@@ -1,13 +1,22 @@
-from setuptools import setup
+import json
 from pathlib import Path
 
-from open_agent.version import VERSION
+from setuptools import setup
+
+with open(
+    Path(__file__).parent.absolute() / "open_agent/metadata.json",
+    mode="rt",
+    encoding="ascii",
+) as f:
+    meta = json.load(f)
+    VERSION = meta.get("VERSION")
 
 try:
-    from open_agent.agent import compile_solver
-    import subprocess
-    import shutil
     import glob
+    import shutil
+    import subprocess
+
+    from open_agent.agent import compile_solver
 
     compile_solver("./build")
 
@@ -27,10 +36,10 @@ try:
             "/bin/bash",
             "konstin2/maturin",
             "-c",
-            "cd /io/python_bindings_open_agent_solver && maturin build --release -i python3.7",
+            "cd /io/python_bindings_open_agent_solver && maturin build --release -i python3.8",
         ],
         cwd=str(python_bindings_src.parent),
-        # ["maturin", "build", "--release", "-i", "python3.7"],
+        # ["maturin", "build", "--release", "-i", "python3.8"],
         # cwd=str(python_bindings_src),
     )
 
@@ -46,7 +55,7 @@ try:
 
 except ImportError:
     print(
-        "WARNING: missing depencencies caused us to fail to compile the solver, rerun once the dependencies have installed"
+        "WARNING: Missing dependencies caused us to fail to compile the solver, rerun once the dependencies have installed."
     )
 
 setup(

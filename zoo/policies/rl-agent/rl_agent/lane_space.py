@@ -3,11 +3,10 @@ this file contains observation adapter and action adapter
 """
 import math
 
-import gym
+import gymnasium as gym
 import numpy as np
 
-from smarts.core.agent_interface import AgentInterface
-from smarts.core.agent_interface import OGM, NeighborhoodVehicles
+from smarts.core.agent_interface import OGM, AgentInterface, NeighborhoodVehicles
 from smarts.core.controllers import ActionSpaceType
 
 # init signal values
@@ -149,7 +148,7 @@ def get_observation_adapter(
 
         goal_info = np.array([goal_is_nearby, goal_relative_lane_index])
 
-        # return if no neighbour vehicle or off the routes(no waypoint paths)
+        # return if no neighbor vehicle or off the routes(no waypoint paths)
         if not neighborhood_vehicle_states or not wp_paths_num:
             return (
                 lane_ttc,
@@ -162,7 +161,7 @@ def get_observation_adapter(
                 goal_info,
             )
 
-        # compute neighbour vehicle closest wp
+        # compute neighbor vehicle closest wp
         nv_poses = np.array([nv.position for nv in neighborhood_vehicle_states])
         nv_wp_distance = np.linalg.norm(
             nv_poses[:, :2][:, np.newaxis] - wp_poses, axis=2
@@ -210,12 +209,12 @@ def get_observation_adapter(
                 wps_with_lane_dist_list += wps_with_lane_dist.tolist()
             wps_with_lane_dist_list = np.array(wps_with_lane_dist_list)
 
-            # get neighbour vehicle closest waypoints index
+            # get neighbor vehicle closest waypoints index
             nv_closest_wp_index = nv_closest_wp_index[close_nv_index]
-            # ego car and neighbour car distance, not very accurate since use the closest wp
+            # ego car and neighbor car distance, not very accurate since use the closest wp
             ego_nv_distance = wps_with_lane_dist_list[nv_closest_wp_index]
 
-            # get neighbour vehicle lane index
+            # get neighbor vehicle lane index
             nv_lane_index = np.array(
                 [merge_waypoint_paths[i].lane_index for i in nv_closest_wp_index]
             )
@@ -535,7 +534,7 @@ def get_observation_adapter(
 
         # get goal
         goal = env_obs.ego_vehicle_state.mission.goal
-        goal_position = goal.position
+        goal_position = getattr(goal, "position", ego_state.position[:2])
 
         (
             lane_ttc,
@@ -606,11 +605,11 @@ def get_action_adapter(target_speed, lane_change_speed):
 
 agent_interface = AgentInterface(
     max_episode_steps=None,
-    waypoints=True,
+    waypoint_paths=True,
     # neighborhood < 60m
-    neighborhood_vehicles=NeighborhoodVehicles(radius=60),
+    neighborhood_vehicle_states=NeighborhoodVehicles(radius=60),
     # OGM within 64 * 0.25 = 16
-    ogm=OGM(64, 64, 0.25),
+    occupancy_grid_map=OGM(64, 64, 0.25),
     action=ActionSpaceType.LaneWithContinuousSpeed,
 )
 

@@ -12,6 +12,7 @@
 #
 import os
 import sys
+from smarts import VERSION
 
 sys.path.insert(0, os.path.abspath(".."))
 
@@ -19,11 +20,11 @@ sys.path.insert(0, os.path.abspath(".."))
 # -- Project information -----------------------------------------------------
 
 project = "SMARTS"
-copyright = "2020, Huawei Technologies."
+copyright = "2021, Huawei Technologies."
 author = "Huawei Noah's Ark Lab."
 
 # The full version, including alpha/beta/rc tags
-release = "0.3.6"
+release = VERSION
 
 
 # -- General configuration ---------------------------------------------------
@@ -32,20 +33,47 @@ release = "0.3.6"
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = [
-    "sphinx_rtd_theme",  # Read The Docs theme
-    "sphinx.ext.autodoc",  # Automatically extract docs from docstrings
-    "sphinx.ext.coverage",  # make coverage generates documentation coverage reports
+    "myst_parser",  # support Markdown-based documentation
+    "sphinx.ext.autodoc",  # automatically extract docs from docstrings
+    "sphinx.ext.coverage",  # to generate documentation coverage reports
+    "sphinx.ext.extlinks",  # shorten external links
     "sphinx.ext.napoleon",  # support Numpy and Google doc style
+    "sphinx.ext.todo",  # support for todo items
     "sphinx.ext.viewcode",  # link to sourcecode from docs
-    "sphinx.ext.graphviz",  # TODO: should we include this?
-    "sphinxcontrib.apidoc",
+    "sphinx_rtd_theme",  # Read The Docs theme
+    "sphinx_click",  # extract documentation from a `click` application
+    "sphinxcontrib.apidoc",  # automatically document the API
+    "sphinxcontrib.spelling",  # check documentation for spelling
 ]
 
-# configuring automated generation of api documentation
+extlinks = {
+    "assets": (
+        "https://github.com/huawei-noah/SMARTS/tree/master/smarts/assets/%s",
+        "%s",
+    ),
+    "examples": (
+        "https://github.com/huawei-noah/SMARTS/tree/master/examples/%s",
+        "%s",
+    ),
+    "scenarios": (
+        "https://github.com/huawei-noah/SMARTS/tree/master/scenarios/%s",
+        "%s",
+    ),
+}
+# Configuring automated generation of api documentation.
 # See: https://github.com/sphinx-contrib/apidoc
 apidoc_module_dir = ".."
-apidoc_excluded_paths = ["scenarios", "setup.py"]
 apidoc_module_first = True
+apidoc_excluded_paths = [
+    "cli",
+    "examples",
+    "setup.py",
+    "scenarios",
+    "smarts/ros",
+    "zoo/policies/interaction_aware_motion_prediction",
+    "smarts/waymo/waymo_open_dataset/protos",
+    "zoo/evaluation/metrics",
+]
 apidoc_extra_args = [
     "--force",
     "--separate",
@@ -54,6 +82,27 @@ apidoc_extra_args = [
     "--maxdepth=2",
     "--templatedir=_templates/apidoc",
 ]
+autodoc_mock_imports = [
+    "av2",
+    "cpuinfo",
+    "cv2",
+    "gymnasium",
+    "lxml",
+    "mdutils",
+    "moviepy",
+    "opendrive2lanelet",
+    "pandas",
+    "pathos",
+    "PIL",
+    "pynput",
+    "ray",
+    "rich",
+    "tabulate",
+    "tools",
+    "torch",
+]
+
+todo_include_todos = True
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -63,6 +112,63 @@ templates_path = ["_templates"]
 # This pattern also affects html_static_path and html_extra_path.
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
+# -- Options for nit-pick (-n) ----------------------------------------------------
+
+nitpick_ignore = {
+    ("py:class", "optional"),
+    ("py:class", "ellipsis"),
+    ("py:class", "function"),
+    # Most of these dynamic type ignores would go away in python>=3.10
+    # See for more context: https:github.com/sphinx-doc/sphinx/issues/10090
+    ("py:class", "Score"),
+    ("py:class", "Done"),
+    ("py:class", "CostFuncs"),
+    ("py:class", "ActType"),
+    ("py:class", "ObsType"),
+    ("py:class", "smarts.env.gymnasium.wrappers.metric.utils.T"),
+    ("py:class", "enum.Enum"),
+    ("py:class", "bc.BulletClient"),
+}
+nitpick_ignore_regex = {
+    (r"py:.*", r"av2\..*"),
+    (r"py:.*", r"google\.protobuf\..*"),
+    (r"py:.*", r"grpc\..*"),
+    (r"py:.*", r"gym\..*"),
+    (r"py:.*", r"gymnasium\..*"),
+    (r"py:.*", r"logging\..*"),
+    (r"py:.*", r"multiprocessing\..*"),
+    (r"py:.*", r"np\..*"),
+    (r"py:.*", r"numpy\..*"),
+    (r"py:.*", r"opendrive2lanelet\..*"),
+    (r"py:.*", r"panda3d\..*"),
+    (r"py:.*", r"pathlib\..*"),
+    (r"py:.*", r"pybullet(_utils)?\..*"),
+    (r"py:.*", r"re\..*"),
+    (r"py:.*", r"shapely\..*"),
+    (r"py:.*", r"sumo(lib)?\..*"),
+    (r"py:.*", r"tornado\..*"),
+    (r"py:.*", r"traci\..*"),
+    (r"py:.*", r"typing(_extensions)?\..*"),
+    (r"py:.*", r"configparser\..*"),
+    (r"py:class", r".*\.?T"),
+    (r"py:class", r".*\.?S"),
+}
+
+# -- Options for broken link checks ------------------------------------------
+linkcheck_anchors = False
+linkcheck_ignore = [
+    r"https?://localhost:\d+/?",
+    r"https?://ops.fhwa.dot.gov.*",  # The ngsim domain (us government) appears to go down sometimes.
+]
+linkcheck_retries = 2
+
+# -- Options for spelling ----------------------------------------------------
+spelling_exclude_patterns = ["ignored_*", "**/*_pb2*"]
+spelling_ignore_pypi_package_names = True
+spelling_show_suggestions = True
+spelling_suggestion_limit = 2
+spelling_ignore_contributor_names = False
+spelling_word_list_filename = ["spelling_wordlist.txt"]
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -71,7 +177,6 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 #
 # html_theme = 'alabaster'
 html_theme = "sphinx_rtd_theme"
-
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,

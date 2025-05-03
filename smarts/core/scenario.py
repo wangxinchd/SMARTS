@@ -12,213 +12,160 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
+from __future__ import annotations
+
 import glob
-import json
 import logging
-import math
 import os
 import pickle
 import random
 import uuid
-from dataclasses import dataclass, field
+import warnings
 from functools import lru_cache
 from itertools import cycle, product
 from pathlib import Path
-from typing import Any, Dict, Sequence, Tuple
-
-import numpy as np
-
-from smarts.sstudio import types as sstudio_types
-from smarts.sstudio.types import (
-    CutIn,
-    EntryTactic,
-    UTurn,
-    Via as SSVia,
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
 )
 
-from .coordinates import Heading
-from .data_model import SocialAgent
-from .route import ShortestRoute
-from .sumo_road_network import SumoRoadNetwork
-from .utils.file import file_md5_hash, make_dir_in_smarts_log_dir, path2hash
-from .utils.id import SocialAgentId
-from .utils.math import vec_to_radians
-from .waypoints import Waypoints
+import cloudpickle
+import numpy as np
+import yaml
 
+from smarts.core.coordinates import Heading, Point, RefLinePoint
+from smarts.core.data_model import SocialAgent
+from smarts.core.plan import (
+    EndlessGoal,
+    LapMission,
+    NavigationMission,
+    PositionalGoal,
+    Start,
+    TraverseGoal,
+    VehicleSpec,
+    Via,
+    default_entry_tactic,
+)
+from smarts.core.traffic_history import TrafficHistory
+from smarts.core.utils.core_math import (
+    combination_pairs_with_unique_indices,
+    radians_to_vec,
+    vec_to_radians,
+)
+from smarts.core.utils.file import make_dir_in_smarts_log_dir, path2hash
+from smarts.core.utils.id import SocialAgentId
+from smarts.sstudio import sstypes as sstudio_types
+from smarts.sstudio.sstypes import EntryTactic, MapSpec
+from smarts.sstudio.sstypes import Via as SSVia
 
-@dataclass(frozen=True)
-class Start:
-    position: Tuple[int, int]
-    heading: Heading
+VehicleWindow = TrafficHistory.TrafficHistoryVehicleWindow
 
+# Suppress trimesh deprecation warning
 
-@dataclass(frozen=True)
-class Goal:
-    def is_endless(self):
-        return True
-
-    def is_reached(self, vehicle):
-        return False
-
-
-@dataclass(frozen=True)
-class EndlessGoal(Goal):
-    pass
-
-
-@dataclass(frozen=True)
-class PositionalGoal(Goal):
-    position: Tuple[int, int]
-    # target_heading: Heading
-    radius: float
-
-    @classmethod
-    def fromedge(cls, edge_id, road_network, lane_index=0, lane_offset=None, radius=1):
-        edge = road_network.edge_by_id(edge_id)
-        lane = edge.getLanes()[lane_index]
-
-        if lane_offset is None:
-            # Default to the midpoint safely ensuring we are on the lane and not
-            # bordering another
-            lane_offset = lane.getLength() * 0.5
-
-        position = road_network.world_coord_from_offset(lane, lane_offset)
-        return cls(position=position, radius=radius)
-
-    def is_endless(self):
-        return False
-
-    def is_reached(self, vehicle):
-        a = vehicle.position
-        b = self.position
-        dist = math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
-        return dist <= self.radius
-
-
-def default_entry_tactic():
-    return sstudio_types.TrapEntryTactic(
-        wait_to_hijack_limit_s=0, exclusion_prefixes=tuple(), zone=None
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message="Please use `coo_matrix` from the `scipy.sparse` namespace, the `scipy.sparse.coo` namespace is deprecated.",
+        category=DeprecationWarning,
     )
+    import trimesh  # only suppress the warnings caused by trimesh
 
-
-@dataclass(frozen=True)
-class Via:
-    lane_id: str
-    edge_id: str
-    lane_index: int
-    position: Tuple[float, float]
-    hit_distance: float
-    required_speed: float
-
-
-@dataclass(frozen=True)
-class Mission:
-    start: Start
-    goal: Goal
-    # An optional list of edge IDs between the start and end goal that we want to
-    # ensure the mission includes
-    route_vias: Tuple[str] = field(default_factory=tuple)
-    start_time: float = 0.1
-    entry_tactic: EntryTactic = None
-    task: Tuple[CutIn, UTurn] = None
-    via: Tuple[Via, ...] = ()
-
-    @property
-    def has_fixed_route(self):
-        return not self.goal.is_endless()
-
-    def is_complete(self, vehicle, distance_travelled):
-        return self.goal.is_reached(vehicle)
-
-
-@dataclass(frozen=True)
-class LapMission:
-    start: Start
-    goal: Goal
-    route_length: float
-    num_laps: int = None  # None means infinite # of laps
-    # An optional list of edge IDs between the start and end goal that we want to
-    # ensure the mission includes
-    route_vias: Tuple[str] = field(default_factory=tuple)
-    start_time: float = 0.1
-    entry_tactic: EntryTactic = None
-    via_points: Tuple[Via, ...] = ()
-
-    @property
-    def has_fixed_route(self):
-        return True
-
-    def is_complete(self, vehicle, distance_travelled):
-        return (
-            self.goal.is_reached(vehicle)
-            and distance_travelled > self.route_length * self.num_laps
-        )
+if TYPE_CHECKING:
+    from smarts.core.road_map import RoadMap
 
 
 class Scenario:
     """The purpose of the Scenario is to provide an aggregate of all
-    code/configuration/assets that is specialized to a scenario using SUMO.
+    code/configuration/assets that is specialized to a scenario.
 
     Args:
         scenario_root:
-            The scenario asset folder ie. './scenarios/trigger'.
-        route:
-            The social vehicle traffic spec.
+            The scenario asset folder (i.e. './scenarios/trigger'.)
+        traffic_specs:
+            The social vehicle traffic specs.
         missions:
             agent_id to mission mapping.
+        map_spec:
+            If specified, allows specifying a :class:`~smarts.sstudio.sstypes.map_spec.MapSpec` at run-time
+            to override any spec that may have been pre-specified
+            in the scenario folder (or the default if none were).
+            Also see comments around the :class:`~smarts.sstudio.sstypes.map_spec.MapSpec` definition.
     """
 
     def __init__(
         self,
         scenario_root: str,
-        route: str = None,
-        missions: Dict[str, Mission] = None,
-        social_agents: Dict[str, SocialAgent] = None,
-        log_dir: str = None,
-        surface_patches: list = None,
+        traffic_specs: Sequence[str] = [],
+        missions: Optional[Dict[str, NavigationMission]] = None,
+        social_agents: Optional[Dict[str, Tuple[Any, SocialAgent]]] = None,
+        log_dir: Optional[str] = None,
+        surface_patches: Optional[Sequence[Dict[str, Any]]] = None,
+        traffic_history: Optional[str] = None,
+        map_spec: Optional[MapSpec] = None,
+        route: Optional[str] = None,  # deprecated: use traffic_specs instead
     ):
 
         self._logger = logging.getLogger(self.__class__.__name__)
         self._root = scenario_root
-        self._route = route
+        self._traffic_specs = traffic_specs
+        if route:
+            warnings.warn(
+                "Scenario route property has been deprecated in favor of traffic_specs.  Please update your code.",
+                category=DeprecationWarning,
+            )
+            traffic_path = os.path.join(scenario_root, "build", "traffic")
+            self._traffic_specs = [os.path.join(traffic_path, route)]
         self._missions = missions or {}
         self._bubbles = Scenario._discover_bubbles(scenario_root)
+        self._metadata = Scenario._discover_metadata(scenario_root)
         self._social_agents = social_agents or {}
         self._surface_patches = surface_patches
         self._log_dir = self._resolve_log_dir(log_dir)
 
-        self._validate_assets_exist()
-        self._road_network = SumoRoadNetwork.from_file(self.net_filepath)
-        self._net_file_hash = file_md5_hash(self.net_filepath)
-        self._waypoints = Waypoints(self._road_network, spacing=1.0)
+        if traffic_history:
+            self._traffic_history = TrafficHistory(traffic_history)
+            default_lane_width = self._traffic_history.lane_width
+        else:
+            self._traffic_history = None
+            default_lane_width = None
+
+        # XXX: using a map builder_fn supplied by users is a security risk
+        # as SMARTS will be executing the code "as is".  We are currently
+        # trusting our users to not try to sabotage their own simulations.
+        # In the future, this may need to be revisited if SMARTS is ever
+        # shared in a multi-user mode.
+        if not map_spec:
+            map_spec = Scenario.discover_map(self._root, 1.0, default_lane_width)
+        self._road_map, self._road_map_hash = map_spec.builder_fn(map_spec)
         self._scenario_hash = path2hash(str(Path(self.root_filepath).resolve()))
+
+        os.makedirs(self._log_dir, exist_ok=True)
 
     def __repr__(self):
         return f"""Scenario(
   _root={self._root},
-  _route={self._route},
+  _traffic_specs={self._traffic_specs},
   _missions={self._missions},
 )"""
 
     @staticmethod
-    def scenario_variations(
-        scenarios_or_scenarios_dirs: Sequence[str],
-        agents_to_be_briefed: Sequence[str],
-        shuffle_scenarios: bool = True,
-    ):
-        """Generate a cycle of the configurations of scenarios.
-
-        Args:
-            scenarios_or_scenarios_dirs:
-                A sequence of either the scenario to run (see scenarios/ for some samples you
-                can use) OR a directory of scenarios to sample from.
-            agents_to_be_briefed:
-                Agent IDs that will be assigned a mission ("briefed" on a mission).
+    def get_scenario_list(scenarios_or_scenarios_dirs: Sequence[str]) -> Sequence[str]:
+        """Find all specific scenario directories in the directory trees of the initial scenario
+        directory.
         """
         scenario_roots = []
         for root in scenarios_or_scenarios_dirs:
@@ -227,25 +174,57 @@ class Scenario:
                 scenario_roots.append(root)
             else:
                 scenario_roots.extend(Scenario.discover_scenarios(root))
+        return scenario_roots
 
+    @staticmethod
+    def scenario_variations(
+        scenarios_or_scenarios_dirs: Sequence[str],
+        agents_to_be_briefed: Sequence[str],
+        shuffle_scenarios: bool = True,
+        circular: bool = True,
+    ) -> Generator["Scenario", None, None]:
+        """Generate a cycle of scenario configurations.
+
+        Args:
+            scenarios_or_scenarios_dirs (Sequence[str]):
+                A sequence of either the scenario to run (see scenarios/ for some samples you
+                can use) OR a directory of scenarios to sample from.
+            agents_to_be_briefed:
+                Agent IDs that will be assigned a mission ("briefed" on a mission).
+        Returns:
+            A generator that serves up Scenarios.
+        """
+        scenario_roots = Scenario.get_scenario_list(scenarios_or_scenarios_dirs)
         if shuffle_scenarios:
             np.random.shuffle(scenario_roots)
-
+        if circular:
+            scenario_roots = cycle(scenario_roots)
         return Scenario.variations_for_all_scenario_roots(
-            cycle(scenario_roots), agents_to_be_briefed, shuffle_scenarios
+            scenario_roots, agents_to_be_briefed, shuffle_scenarios
         )
 
     @staticmethod
     def variations_for_all_scenario_roots(
         scenario_roots, agents_to_be_briefed, shuffle_scenarios=True
-    ):
+    ) -> Generator["Scenario", None, None]:
+        """Convert scenario roots to concrete scenarios.
+        Args:
+            scenario_roots:
+                Scenario directories containing scenario resource files.
+            agents_to_be_briefed:
+                Agent IDs that will be assigned a mission ("briefed" on a mission).
+            shuffle_scenarios:
+                Return scenarios in a pseudo-random order.
+        Returns:
+            A generator that serves up Scenarios.
+        """
         for scenario_root in scenario_roots:
             surface_patches = Scenario.discover_friction_map(scenario_root)
 
             agent_missions = Scenario.discover_agent_missions(
                 scenario_root, agents_to_be_briefed
             )
-            agent_missions = [dict(zip(agents_to_be_briefed, agent_missions))]
+
             social_agent_infos = Scenario._discover_social_agents_info(scenario_root)
             social_agents = [
                 {
@@ -260,27 +239,41 @@ class Scenario:
 
             # `or [None]` so that product(...) will not return an empty result
             # but insted a [(..., `None`), ...].
-            routes = Scenario.discover_routes(scenario_root) or [None]
             agent_missions = agent_missions or [None]
+            if len(agents_to_be_briefed) > len(agent_missions):
+                warnings.warn(
+                    f"Scenario `{scenario_root}` has {len(agent_missions)} missions and"
+                    f" but there are {len(agents_to_be_briefed)} agents to assign"
+                    " missions to. The missions will be padded with random missions."
+                )
+            mission_agent_groups = combination_pairs_with_unique_indices(
+                agents_to_be_briefed, agent_missions
+            )
             social_agents = social_agents or [None]
+            traffic_histories = Scenario.discover_traffic_histories(scenario_root) or [
+                None
+            ]
+            traffic = Scenario.discover_traffic(scenario_root) or [[]]
 
-            roll_routes = 0
-            roll_agent_missions = 0
+            roll_traffic = 0
             roll_social_agents = 0
+            roll_traffic_histories = 0
 
             if shuffle_scenarios:
-                roll_routes = random.randint(0, len(routes))
-                roll_agent_missions = random.randint(0, len(agent_missions))
+                roll_traffic = random.randint(0, len(traffic))
                 roll_social_agents = random.randint(0, len(social_agents))
+                roll_traffic_histories = 0  # random.randint(0, len(traffic_histories))
 
             for (
-                concrete_route,
+                concrete_traffic,
                 concrete_agent_missions,
                 concrete_social_agents,
+                concrete_traffic_history,
             ) in product(
-                np.roll(routes, roll_routes, 0),
-                np.roll(agent_missions, roll_agent_missions, 0),
+                np.roll(traffic, roll_traffic, 0),
+                mission_agent_groups,
                 np.roll(social_agents, roll_social_agents, 0),
+                np.roll(traffic_histories, roll_traffic_histories, 0),
             ):
                 concrete_social_agent_missions = {
                     agent_id: mission
@@ -299,18 +292,20 @@ class Scenario:
 
                 yield Scenario(
                     scenario_root,
-                    route=concrete_route,
+                    traffic_specs=concrete_traffic,
                     missions={
-                        **(concrete_agent_missions or {}),
+                        **{a_id: mission for a_id, mission in concrete_agent_missions},
                         **concrete_social_agent_missions,
                     },
                     social_agents=concrete_social_agents,
                     surface_patches=surface_patches,
+                    traffic_history=concrete_traffic_history,
                 )
 
     @staticmethod
     def discover_agent_missions_count(scenario_root):
-        missions_file = os.path.join(scenario_root, "missions.pkl")
+        """Retrieve the agent missions from the given scenario directory."""
+        missions_file = os.path.join(scenario_root, "build", "missions.pkl")
         if os.path.exists(missions_file):
             with open(missions_file, "rb") as f:
                 return len(pickle.load(f))
@@ -328,45 +323,32 @@ class Scenario:
         len(missions)`. In this case a list of one dictionary is returned.
         """
 
-        net_file = os.path.join(scenario_root, "map.net.xml")
-        road_network = SumoRoadNetwork.from_file(net_file)
+        road_map, _ = Scenario.build_map(scenario_root)
 
         missions = []
-        missions_file = os.path.join(scenario_root, "missions.pkl")
+        missions_file = os.path.join(scenario_root, "build", "missions.pkl")
         if os.path.exists(missions_file):
             with open(missions_file, "rb") as f:
                 missions = pickle.load(f)
 
             missions = [
-                Scenario._extract_mission(actor_and_mission.mission, road_network)
+                Scenario._extract_mission(actor_and_mission.mission, road_map)
                 for actor_and_mission in missions
             ]
 
         if not missions:
             missions = [None for _ in range(len(agents_to_be_briefed))]
 
-        if len(agents_to_be_briefed) == 1:
-            # single-agent, so we cycle through all missions individually.
-            return missions
-        elif len(agents_to_be_briefed) > 1:
-            # multi-agent, so we assume missions "drive" the agents (i.e. one
-            # mission per agent) and we will not be cycling through missions.
-            assert not missions or len(missions) == len(agents_to_be_briefed), (
-                "You must either provide an equal number of missions ({}) to "
-                "agents ({}) or provide no missions at all so they can be "
-                "randomly generated.".format(len(missions), len(agents_to_be_briefed))
-            )
-
         return missions
 
     @staticmethod
-    def discover_friction_map(scenario_root):
+    def discover_friction_map(scenario_root) -> List[Dict[str, Any]]:
         """Returns the list of surface patches parameters defined in
         scenario file. Each element of the list contains the
-        parameters of the specifiec surface patch.
+        parameters of the specified surface patch.
         """
         surface_patches = []
-        friction_map_file = os.path.join(scenario_root, "friction_map.pkl")
+        friction_map_file = os.path.join(scenario_root, "build", "friction_map.pkl")
         if os.path.exists(friction_map_file):
             with open(friction_map_file, "rb") as f:
                 map_surface_patches = pickle.load(f)
@@ -383,7 +365,9 @@ class Scenario:
 
     @staticmethod
     @lru_cache(maxsize=16)
-    def _discover_social_agents_info(scenario,) -> Sequence[Dict[str, SocialAgent]]:
+    def _discover_social_agents_info(
+        scenario: Union[str, Scenario],
+    ) -> Sequence[Dict[str, Tuple[SocialAgent, NavigationMission]]]:
         """Loops through the social agent mission pickles, instantiating corresponding
         implementations for the given types. The output is a list of
         {agent_id: (mission, locator)}, where each dictionary corresponds to the
@@ -393,10 +377,9 @@ class Scenario:
         scenario_root = (
             scenario.root_filepath if isinstance(scenario, Scenario) else scenario
         )
-        net_file = os.path.join(scenario_root, "map.net.xml")
-        road_network = SumoRoadNetwork.from_file(net_file)
+        road_map, _ = Scenario.build_map(scenario_root)
 
-        social_agents_path = os.path.join(scenario_root, "social_agents")
+        social_agents_path = os.path.join(scenario_root, "build", "social_agents")
         if not os.path.exists(social_agents_path):
             return []
 
@@ -404,7 +387,7 @@ class Scenario:
         agent_bucketer = []
 
         # like dict.setdefault
-        def setdefault(l: Sequence[Any], index: int, default):
+        def setdefault(l: list, index: int, default):
             while len(l) < index + 1:
                 l.append([])
             return l[index]
@@ -427,7 +410,7 @@ class Scenario:
 
                 actor = mission_and_actor.actor
                 extracted_mission = Scenario._extract_mission(
-                    mission_and_actor.mission, road_network
+                    mission_and_actor.mission, road_map
                 )
                 namespace = os.path.basename(missions_file_path)
                 namespace = os.path.splitext(namespace)[0]
@@ -436,7 +419,7 @@ class Scenario:
                     (
                         SocialAgent(
                             id=SocialAgentId.new(actor.name, group=namespace),
-                            name=actor.name,
+                            actor_name=actor.name,
                             is_boid=False,
                             is_boid_keep_alive=False,
                             agent_locator=actor.agent_locator,
@@ -453,11 +436,17 @@ class Scenario:
             social_agents_info.append(
                 {agent.id: (agent, mission) for agent, mission in l}
             )
-
         return social_agents_info
 
     @staticmethod
     def discover_scenarios(scenario_or_scenarios_dir):
+        """Retrieve all specific scenarios in the directory tree of the given scenario directory.
+        Args:
+            scenario_or_scenario_dir:
+                A directory that either immediately contains a scenario or the root of a directory tree that contains multiple scenarios.
+        Returns:
+            All specific scenarios.
+        """
         if Scenario.is_valid_scenario(scenario_or_scenarios_dir):
             # This is the single scenario mode, only training against a single scenario
             scenario = scenario_or_scenarios_dir
@@ -476,24 +465,88 @@ class Scenario:
         return discovered_scenarios
 
     @staticmethod
+    def build_map(scenario_root: str) -> Tuple[Optional[RoadMap], Optional[str]]:
+        """Builds a road map from the given scenario's resources."""
+        # XXX: using a map builder_fn supplied by users is a security risk
+        # as SMARTS will be executing the code "as is".  We are currently
+        # trusting our users to not try to sabotage their own simulations.
+        # In the future, this may need to be revisited if SMARTS is ever
+        # shared in a multi-user mode.
+        map_spec = Scenario.discover_map(scenario_root)
+        return map_spec.builder_fn(map_spec)
+
+    @staticmethod
+    def discover_map(
+        scenario_root: str,
+        lanepoint_spacing: Optional[float] = None,
+        default_lane_width: Optional[float] = None,
+        shift_to_origin: bool = False,
+    ) -> MapSpec:
+        """Generates the map specification from the given scenario's file resources.
+
+        Args:
+            scenarios_root:
+                A specific scenario to run (e.g. scenarios/sumo/loop)
+            lanepoint_spacing:
+                The distance between lane-points that represent a lane's geometry.
+            default_lane_width:
+                The default width of a lane from its center if it does not have a specific width.
+            shift_to_origin:
+                Shifts the map location to near the simulation origin so that the map contains (0, 0).
+        Returns:
+            A new map spec.
+        """
+        path = os.path.join(scenario_root, "build", "map", "map_spec.pkl")
+        if not os.path.exists(path):
+            # Use our default map builder if none specified by scenario...
+            return MapSpec(
+                scenario_root,
+                lanepoint_spacing,
+                default_lane_width,
+                shift_to_origin,
+            )
+        with open(path, "rb") as f:
+            road_map = cloudpickle.load(f)
+            return road_map
+
+    @staticmethod
     def discover_routes(scenario_root):
         """Discover the route files in the given scenario.
 
-        >>> Scenario.discover_routes("scenarios/intersections/2lane")
+        >>> Scenario.discover_routes("scenarios/sumo/intersections/2lane")
         ['all.rou.xml', 'horizontal.rou.xml', 'turns.rou.xml', 'unprotected_left.rou.xml', 'vertical.rou.xml']
-        >>> Scenario.discover_routes("scenarios/loop") # loop does not have any routes
+        >>> Scenario.discover_routes("scenarios/sumo/loop") # loop does not have any routes
         ['basic.rou.xml']
         """
+        warnings.warn(
+            "Scenario.discover_routes() has been deprecated in favor of Scenario.discover_traffic().  Please update your code.",
+            category=DeprecationWarning,
+        )
         return sorted(
             [
                 os.path.basename(r)
-                for r in glob.glob(os.path.join(scenario_root, "traffic", "*.rou.xml"))
+                for r in glob.glob(
+                    os.path.join(scenario_root, "build", "traffic", "*.rou.xml")
+                )
             ]
         )
 
     @staticmethod
+    def discover_traffic(scenario_root: str) -> List[Optional[List[str]]]:
+        """Discover the traffic spec files in the given scenario."""
+        traffic_path = os.path.join(scenario_root, "build", "traffic")
+        # combine any SMARTS and SUMO traffic together...
+        sumo_traffic = glob.glob(os.path.join(traffic_path, "*.rou.xml"))
+        smarts_traffic = glob.glob(os.path.join(traffic_path, "*.smarts.xml"))
+        if sumo_traffic and not smarts_traffic:
+            return [[ts] for ts in sumo_traffic]
+        elif not sumo_traffic and smarts_traffic:
+            return [[ts] for ts in smarts_traffic]
+        return [list(ts) for ts in product(sumo_traffic, smarts_traffic)]
+
+    @staticmethod
     def _discover_bubbles(scenario_root):
-        path = os.path.join(scenario_root, "bubbles.pkl")
+        path = os.path.join(scenario_root, "build", "bubbles.pkl")
         if not os.path.exists(path):
             return []
 
@@ -501,52 +554,187 @@ class Scenario:
             bubbles = pickle.load(f)
             return bubbles
 
-    def set_ego_missions(self, ego_mission):
-        self._missions.update(ego_mission)
+    @staticmethod
+    def _discover_metadata(scenario_root):
+        path = os.path.join(scenario_root, "build", "scenario_metadata.yaml")
+        if not os.path.exists(path):
+            return dict()
 
-    def discover_missions_of_traffic_histories(self):
-        current_traffic_history = self.discover_traffic_histories()[0] or {}
+        with open(path, "r") as f:
+            metadata = yaml.load(f, yaml.Loader)
+            return metadata
 
-        vehicle_missions = {}
-        # sort by timestamp
-        sorted_history = sorted(
-            current_traffic_history.items(), key=lambda d: float(d[0])
+    def set_ego_missions(self, ego_missions: Dict[str, NavigationMission]):
+        """Replaces the ego missions within the scenario.
+        Args:
+            ego_missions: Ego agent ids mapped to missions.
+        """
+        self._missions = ego_missions
+
+    def get_vehicle_start_at_time(
+        self, vehicle_id: str, start_time: float
+    ) -> Tuple[Start, float]:
+        """Returns a Start object that can be used to create a Mission for
+        a vehicle from a traffic history dataset starting at its location
+        at start_time.  Also returns its speed at that time."""
+        pphs = self._traffic_history.vehicle_pose_at_time(vehicle_id, start_time)
+        assert pphs
+        pos_x, pos_y, heading, speed = pphs
+        # missions start from front bumper, but pos is center of vehicle
+        veh_dims = self._traffic_history.vehicle_dims(vehicle_id)
+        hhx, hhy = radians_to_vec(heading) * (0.5 * veh_dims.length)
+        return (
+            Start(
+                np.array([pos_x + hhx, pos_y + hhy]),
+                Heading(heading),
+                from_front_bumper=True,
+            ),
+            speed,
         )
-        for t, vehicle_states in sorted_history:
-            for vehicle_id in vehicle_states:
-                if vehicle_id not in vehicle_missions:
-                    vehicle_missions[vehicle_id] = Mission(
-                        start=Start(
-                            vehicle_states[vehicle_id]["position"][:2],
-                            Heading(vehicle_states[vehicle_id]["heading"]),
-                        ),
-                        goal=EndlessGoal(),
-                        start_time=float(t),
-                    )
 
+    def get_vehicle_goal(self, vehicle_id: str) -> Point:
+        """Get the final position for a history vehicle."""
+        final_exit_time = self._traffic_history.vehicle_final_exit_time(vehicle_id)
+        final_pose = self._traffic_history.vehicle_pose_at_time(
+            vehicle_id, final_exit_time
+        )
+        assert final_pose
+        final_pos_x, final_pos_y, _, _ = final_pose
+        return Point(final_pos_x, final_pos_y)
+
+    def discover_missions_of_traffic_histories(self) -> Dict[str, NavigationMission]:
+        """Retrieves the missions of traffic history vehicles."""
+        vehicle_missions = {}
+        for row in self._traffic_history.first_seen_times():
+            v_id = str(row[0])
+            start_time = float(row[1])
+            start, speed = self.get_vehicle_start_at_time(v_id, start_time)
+            entry_tactic = default_entry_tactic(speed)
+            veh_config_type = self._traffic_history.vehicle_config_type(v_id)
+            veh_dims = self._traffic_history.vehicle_dims(v_id)
+            vehicle_missions[v_id] = NavigationMission(
+                start=start,
+                entry_tactic=entry_tactic,
+                goal=TraverseGoal(self.road_map),
+                start_time=start_time,
+                vehicle_spec=VehicleSpec(
+                    veh_id=v_id,
+                    veh_config_type=veh_config_type,
+                    dimensions=veh_dims,
+                ),
+            )
         return vehicle_missions
 
-    def discover_traffic_histories(self):
-        path = os.path.join(self._root, "traffic_histories.pkl")
-        if not os.path.exists(path):
-            return []
+    def create_dynamic_traffic_history_mission(
+        self, vehicle_id: str, trigger_time: float, positional_radius: int
+    ) -> Tuple[NavigationMission, NavigationMission]:
+        """Builds missions out of the given vehicle information.
+        Args:
+            vehicle_id:
+                The id of a vehicle in the traffic history dataset.
+            trigger_time:
+                The time that this mission should become active.
+            positional_radius:
+                The goal radius for the positional goal.
+        Returns:
+            (smarts.core.plan.NavigationMission, smarts.core.plan.NavigationMission): A positional mission that follows the initial
+             original vehicle's travel as well as a traverse style mission which is done when the
+             vehicle leaves the map.
+        """
+        start, speed = self.get_vehicle_start_at_time(vehicle_id, trigger_time)
+        veh_goal = self.get_vehicle_goal(vehicle_id)
+        entry_tactic = default_entry_tactic(speed)
+        # create a positional mission and a traverse mission
+        positional_mission = NavigationMission(
+            start=start,
+            entry_tactic=entry_tactic,
+            goal=PositionalGoal(veh_goal, radius=positional_radius),
+        )
+        traverse_mission = NavigationMission(
+            start=start,
+            entry_tactic=entry_tactic,
+            goal=TraverseGoal(self._road_map),
+        )
+        return positional_mission, traverse_mission
 
-        traffic_histories = []
-        with open(path, "rb") as f:
-            files = pickle.load(f)
-            for file_name in files:
-                with open(os.path.join(self._root, file_name), "r") as history_file:
-                    traffic_histories.append(json.loads(history_file.read()))
+    def history_missions_for_window(
+        self,
+        exists_at_or_after: float,
+        ends_before: float,
+        minimum_vehicle_window: float,
+        filter: Optional[
+            Callable[
+                [Iterable[VehicleWindow]],
+                Iterable[VehicleWindow],
+            ]
+        ] = None,
+    ) -> Sequence[NavigationMission]:
+        """Discovers vehicle missions for the given window of time.
 
-        return traffic_histories
+        :param exists_at_or_after: The starting time of any vehicles to query for.
+        :type exists_at_or_after: float
+        :param ends_before: The last point in time a vehicle should be in the simulation.
+            Vehicles ending after that time are not considered.
+        :type ends_before: float
+        :param minimum_vehicle_window: The minimum time that a vehicle must be in the simulation
+            to be considered for a mission.
+        :type minimum_vehicle_window: float
+        :param filter: A filter in the form of ``(func(Sequence[TrafficHistoryVehicleWindow]) -> Sequence[TrafficHistoryVehicleWindow])``,
+            which passes in traffic vehicle information and then should be used purely to filter the sequence down.
+        :return: A set of missions derived from the traffic history.
+        :rtype: List[smarts.core.plan.NavigationMission]
+        """
+        vehicle_windows = self._traffic_history.vehicle_windows_in_range(
+            exists_at_or_after, ends_before, minimum_vehicle_window
+        )
+
+        def _gen_mission(vw: TrafficHistory.TrafficHistoryVehicleWindow):
+            assert isinstance(
+                vw, TrafficHistory.TrafficHistoryVehicleWindow
+            ), "`filter(..)` likely returns malformed data."
+            v_id = str(vw.vehicle_id)
+            start_time = float(vw.start_time)
+            start = Start(
+                np.array(vw.axle_start_position),
+                Heading(vw.start_heading),
+            )
+            entry_tactic = default_entry_tactic(vw.start_speed)
+            veh_config_type = vw.vehicle_type
+            veh_dims = vw.dimensions
+            vehicle_mission = NavigationMission(
+                start=start,
+                entry_tactic=entry_tactic,
+                goal=TraverseGoal(self.road_map),
+                start_time=start_time,
+                vehicle_spec=VehicleSpec(
+                    veh_id=v_id,
+                    veh_config_type=veh_config_type,
+                    dimensions=veh_dims,
+                ),
+            )
+            return vehicle_mission
+
+        if filter is not None:
+            vehicle_windows = filter(vehicle_windows)
+        return [_gen_mission(vw) for vw in vehicle_windows]
 
     @staticmethod
-    def _extract_mission(mission, road_network):
-        """Takes a sstudio.types.(Mission, EndlessMission, etc.) and converts it to
+    def discover_traffic_histories(scenario_root: str):
+        """Finds all existing traffic history files in the specific scenario."""
+        build_dir = Path(scenario_root) / "build"
+        return [
+            entry
+            for entry in os.scandir(str(build_dir))
+            if entry.is_file() and entry.path.endswith(".shf")
+        ]
+
+    @staticmethod
+    def _extract_mission(mission, road_map):
+        """Takes a sstudio.sstypes.(Mission, EndlessMission, etc.) and converts it to
         the corresponding SMARTS mission types.
         """
 
-        def resolve_offset(offset, lane_length):
+        def resolve_offset(offset: Union[str, float], lane_length: float):
             # epsilon to ensure we are within this edge and not the subsequent one
             epsilon = 1e-6
             lane_length -= epsilon
@@ -559,36 +747,36 @@ class Scenario:
             else:
                 return float(offset)
 
-        def to_position_and_heading(edge_id, lane_index, offset, road_network):
-            edge = road_network.edge_by_id(edge_id)
-            lane = edge.getLanes()[lane_index]
-            offset = resolve_offset(offset, lane.getLength())
-            position = road_network.world_coord_from_offset(lane, offset)
-            lane_vector = road_network.lane_vector_at_offset(lane, offset)
-            heading = vec_to_radians(lane_vector)
-            return tuple(position), Heading(heading)
+        def to_position_and_heading(
+            road_id: str, lane_index: int, offset: Union[str, float], road_map: RoadMap
+        ):
+            road = road_map.road_by_id(road_id)
+            lane = road.lane_at_index(lane_index)
+            offset = resolve_offset(offset, lane.length)
+            position = lane.from_lane_coord(RefLinePoint(s=offset))
+            lane_vector = lane.vector_at_offset(offset)
+            heading = vec_to_radians(lane_vector[:2])
+            return position, Heading(heading)
 
         def to_scenario_via(
-            vias: Tuple[SSVia, ...], sumo_road_network: SumoRoadNetwork
+            vias: Tuple[SSVia, ...], road_map: RoadMap
         ) -> Tuple[Via, ...]:
             s_vias = []
             for via in vias:
-                lane = sumo_road_network.lane_by_index_on_edge(
-                    via.edge_id, via.lane_index
-                )
+                road = road_map.road_by_id(via.road_id)
+                lane = road.lane_at_index(via.lane_index)
+                lane_width, _ = lane.width_at_offset(via.lane_offset)
                 hit_distance = (
-                    via.hit_distance if via.hit_distance > 0 else lane.getWidth() / 2
+                    via.hit_distance if via.hit_distance > 0 else lane_width / 2
                 )
-                via_position = sumo_road_network.world_coord_from_offset(
-                    lane, via.lane_offset,
-                )
+                via_position = lane.from_lane_coord(RefLinePoint(via.lane_offset))
 
                 s_vias.append(
                     Via(
-                        lane_id=lane.getID(),
+                        lane_id=lane.lane_id,
                         lane_index=via.lane_index,
-                        edge_id=via.edge_id,
-                        position=tuple(via_position),
+                        road_id=via.road_id,
+                        position=tuple(via_position[:2]),
                         hit_distance=hit_distance,
                         required_speed=via.required_speed,
                     )
@@ -596,68 +784,80 @@ class Scenario:
 
             return tuple(s_vias)
 
-        # For now we discard the route and just take the start and end to form our
-        # missions.
+        # XXX: For now we discard the route and just take the start and end to form our missions.
+        # In the future, we could create a Plan object here too when there's a route specified.
         if isinstance(mission, sstudio_types.Mission):
             position, heading = to_position_and_heading(
-                *mission.route.begin, road_network,
+                *mission.route.begin,
+                road_map,
             )
             start = Start(position, heading)
 
-            position, _ = to_position_and_heading(*mission.route.end, road_network,)
+            position, _ = to_position_and_heading(
+                *mission.route.end,
+                road_map,
+            )
             goal = PositionalGoal(position, radius=2)
 
-            return Mission(
+            entry_tactic = mission.entry_tactic
+            start_time = Scenario._extract_mission_start_time(mission, entry_tactic)
+            return NavigationMission(
                 start=start,
                 route_vias=mission.route.via,
                 goal=goal,
-                start_time=mission.start_time,
-                entry_tactic=mission.entry_tactic,
-                task=mission.task,
-                via=to_scenario_via(mission.via, road_network),
+                start_time=start_time,
+                entry_tactic=entry_tactic,
+                via=to_scenario_via(mission.via, road_map),
             )
         elif isinstance(mission, sstudio_types.EndlessMission):
-            position, heading = to_position_and_heading(*mission.begin, road_network,)
+            position, heading = to_position_and_heading(
+                *mission.begin,
+                road_map,
+            )
             start = Start(position, heading)
 
-            return Mission(
+            entry_tactic = mission.entry_tactic
+            start_time = Scenario._extract_mission_start_time(mission, entry_tactic)
+            return NavigationMission(
                 start=start,
                 goal=EndlessGoal(),
-                start_time=mission.start_time,
-                entry_tactic=mission.entry_tactic,
-                via=to_scenario_via(mission.via, road_network),
+                start_time=start_time,
+                entry_tactic=entry_tactic,
+                via=to_scenario_via(mission.via, road_map),
             )
         elif isinstance(mission, sstudio_types.LapMission):
-            start_edge_id, start_lane, start_edge_offset = mission.route.begin
-            end_edge_id, end_lane, end_edge_offset = mission.route.end
+            start_road_id, start_lane, start_road_offset = mission.route.begin
+            end_road_id, end_lane, end_road_offset = mission.route.end
 
-            travel_edge = road_network.edge_by_id(start_edge_id)
-            if start_edge_id == end_edge_id:
-                travel_edge = list(travel_edge.getOutgoing())[0]
+            travel_road = road_map.road_by_id(start_road_id)
+            if start_road_id == end_road_id:
+                travel_road = travel_road.outgoing_roads[0]
 
-            end_edge = road_network.edge_by_id(end_edge_id)
-            via_edges = [road_network.edge_by_id(e) for e in mission.route.via]
+            end_road = road_map.road_by_id(end_road_id)
+            via_roads = [road_map.road_by_id(r) for r in mission.route.via]
 
-            route_length = ShortestRoute(
-                road_network,
-                edge_constraints=[travel_edge] + via_edges + [end_edge],
-                wraps_around=True,
-            ).length
+            route = road_map.generate_routes(travel_road, end_road, via_roads, 1)[0]
 
             start_position, start_heading = to_position_and_heading(
-                *mission.route.begin, road_network,
+                *mission.route.begin,
+                road_map,
             )
-            end_position, _ = to_position_and_heading(*mission.route.end, road_network,)
+            end_position, _ = to_position_and_heading(
+                *mission.route.end,
+                road_map,
+            )
 
+            entry_tactic = mission.entry_tactic
+            start_time = Scenario._extract_mission_start_time(mission, entry_tactic)
             return LapMission(
                 start=Start(start_position, start_heading),
                 goal=PositionalGoal(end_position, radius=2),
                 route_vias=mission.route.via,
+                start_time=start_time,
+                entry_tactic=entry_tactic,
+                via=to_scenario_via(mission.via, road_map),
                 num_laps=mission.num_laps,
-                route_length=route_length,
-                start_time=mission.start_time,
-                entry_tactic=mission.entry_tactic,
-                via_points=to_scenario_via(mission.via, road_network),
+                route_length=route.road_length,
             )
 
         raise RuntimeError(
@@ -665,32 +865,33 @@ class Scenario:
         )
 
     @staticmethod
-    def is_valid_scenario(scenario_root):
+    def _extract_mission_start_time(mission, entry_tactic: Optional[EntryTactic]):
+        return (
+            mission.start_time
+            if mission.start_time != sstudio_types.MISSING
+            else entry_tactic.start_time
+            if entry_tactic
+            else 0
+        )
+
+    @staticmethod
+    def is_valid_scenario(scenario_root) -> bool:
         """Checks if the scenario_root directory matches our expected scenario structure
 
-        >>> Scenario.is_valid_scenario("scenarios/loop")
+        >>> Scenario.is_valid_scenario("scenarios/sumo/loop")
         True
         >>> Scenario.is_valid_scenario("scenarios/non_existant")
         False
         """
-        paths = [
-            os.path.join(scenario_root, "map.net.xml"),
-        ]
-
-        for f in paths:
-            if not os.path.exists(f):
-                return False
-
-        # make sure we can load the sumo network
-        net_file = os.path.join(scenario_root, "map.net.xml")
-        net = SumoRoadNetwork.from_file(net_file)
-        if net is None:
+        # just make sure we can load the map
+        try:
+            road_map, _ = Scenario.build_map(scenario_root)
+        except FileNotFoundError:
             return False
-
-        return True
+        return road_map is not None
 
     @staticmethod
-    def next(scenario_iterator, log_id=""):
+    def next(scenario_iterator, log_id="") -> "Scenario":
         """Utility to override specific attributes from a scenario iterator"""
 
         scenario = next(scenario_iterator)
@@ -698,84 +899,191 @@ class Scenario:
         return scenario
 
     @property
-    def name(self):
-        return os.path.basename(os.path.normpath(self._root))
+    def name(self) -> str:
+        """The name of the scenario."""
+        return os.path.normpath(self._root)
 
     @property
-    def root_filepath(self):
+    def root_filepath(self) -> str:
+        """The root directory of the scenario."""
         return self._root
 
     @property
     def surface_patches(self):
+        """A list of surface areas with dynamics implications (e.g. icy road.)"""
         return self._surface_patches
 
     @property
-    def net_filepath(self):
-        return os.path.join(self._root, "map.net.xml")
+    def road_map_hash(self):
+        """A hash value of this road map."""
+        return self._road_map_hash
 
     @property
-    def net_file_hash(self):
-        return self._net_file_hash
-
-    @property
-    def plane_filepath(self):
+    def plane_filepath(self) -> str:
+        """The ground plane."""
         return os.path.join(self._root, "plane.urdf")
 
     @property
-    def vehicle_filepath(self):
+    def vehicle_filepath(self) -> Optional[str]:
+        """The file-path of the vehicle's physics model."""
+        warnings.warn(
+            "tire_parameters_filepath is no longer in use.  Please update your code.",
+            category=DeprecationWarning,
+        )
+        if not os.path.isdir(self._root):
+            return None
         for fname in os.listdir(self._root):
-            if fname.endswith(".urdf") and fname != "plane.urdf":
+            if fname.endswith("vehicle.urdf"):
                 return os.path.join(self._root, fname)
         return None
 
     @property
-    def tire_parameters_filepath(self):
+    def tire_parameters_filepath(self) -> str:
+        """The path of the tire model's parameters."""
+        warnings.warn(
+            "tire_parameters_filepath is no longer in use.  Please update your code.",
+            category=DeprecationWarning,
+        )
         return os.path.join(self._root, "tire_parameters.yaml")
 
     @property
-    def controller_parameters_filepath(self):
+    def controller_parameters_filepath(self) -> str:
+        """The path of the vehicle controller parameters."""
+        warnings.warn(
+            "controller_parameters_filepath is no longer in use.  Please update your code.",
+            category=DeprecationWarning,
+        )
         return os.path.join(self._root, "controller_parameters.yaml")
 
     @property
-    def route(self):
-        return self._route
+    def vehicle_definitions_filepath(self) -> str:
+        """The path to the default list of vehicle definitions."""
+        return os.path.join(self._root, "vehicle_definitions_list.yaml")
+
+    @property
+    def traffic_specs(self) -> Sequence[str]:
+        """The traffic spec file names to use for this scenario."""
+        return self._traffic_specs
+
+    @property
+    def route(self) -> Optional[str]:
+        """The traffic route file name."""
+        warnings.warn(
+            "Scenario route property has been deprecated in favor of traffic_specs.  Please update your code.",
+            category=DeprecationWarning,
+        )
+        assert len(self._traffic_specs) <= 1
+        return (
+            os.path.basename(self._traffic_specs[0])
+            if len(self._traffic_specs) == 1
+            else None
+        )
 
     @property
     def route_files_enabled(self):
-        return bool(self._route)
+        """If there is a traffic route file."""
+        warnings.warn(
+            "Scenario route_file_enabled property has been deprecated in favor of traffic_specs.  Please update your code.",
+            category=DeprecationWarning,
+        )
+        return bool(self._traffic_specs)
 
     @property
     def route_filepath(self):
-        return os.path.join(self._root, "traffic", self._route)
+        """The file-path to the traffic route file."""
+        warnings.warn(
+            "Scenario route_filepath property has been deprecated in favor of traffic_specs.  Please update your code.",
+            category=DeprecationWarning,
+        )
+        assert len(self._traffic_specs) == 1
+        return self._traffic_specs[0]
 
     @property
     def map_glb_filepath(self):
-        return os.path.join(self._root, "map.glb")
+        """The map geometry file-path."""
+        return os.path.join(self._root, "build", "map", "map.glb")
+
+    @property
+    def map_glb_metadata(self):
+        """The metadata for the current map `.glb` file."""
+        metadata = self.map_glb_meta_for_file(self.map_glb_filepath)
+        return metadata
+
+    @staticmethod
+    @lru_cache(1)
+    def map_glb_meta_for_file(filepath):
+        """The map metadata given a file."""
+
+        scene = trimesh.load(filepath)
+        return scene.metadata
 
     def unique_sumo_log_file(self):
+        """A unique logging file for SUMO logging."""
         return os.path.join(self._log_dir, f"sumo-{str(uuid.uuid4())[:8]}")
 
     @property
-    def waypoints(self):
-        return self._waypoints
+    def road_map(self) -> RoadMap:
+        """The road map of the scenario."""
+        return self._road_map
 
     @property
-    def road_network(self):
-        return self._road_network
+    def map_spec(self) -> Optional[MapSpec]:
+        """The map spec for the road map used in this scenario."""
+        return self.road_map.map_spec
 
     @property
-    def missions(self):
+    def supports_sumo_traffic(self) -> bool:
+        """Returns True if this scenario uses a Sumo road network."""
+        from smarts.core.sumo_road_network import SumoRoadNetwork
+
+        return isinstance(self._road_map, SumoRoadNetwork)
+
+    @staticmethod
+    def any_support_sumo_traffic(scenarios: Sequence[str]) -> bool:
+        """Determines if any of the given scenarios support Sumo traffic simulation."""
+        from smarts.core.default_map_builder import MapType, find_mapfile_in_dir
+
+        for scenario_root in Scenario.get_scenario_list(scenarios):
+            map_type, _ = find_mapfile_in_dir(scenario_root)
+            if map_type == MapType.Sumo:
+                return True
+
+        return False
+
+    @staticmethod
+    def all_support_sumo_traffic(scenarios: Sequence[str]) -> bool:
+        """Determines if all given scenarios support Sumo traffic simulation."""
+        from smarts.core.sumo_road_network import SumoRoadNetwork
+
+        for scenario_root in Scenario.get_scenario_list(scenarios):
+            try:
+                road_map, _ = Scenario.build_map(scenario_root)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"Unable to find network file in map_source={scenario_root}."
+                )
+            if not isinstance(road_map, SumoRoadNetwork):
+                return False
+
+        return True
+
+    @property
+    def missions(self) -> Dict[str, NavigationMission]:
+        """Agent missions contained within this scenario."""
         return self._missions
 
     @property
-    def social_agents(self):
+    def social_agents(self) -> Dict[str, Tuple[Any, SocialAgent]]:
+        """Managed social agents within this scenario."""
         return self._social_agents
 
     @property
     def bubbles(self):
+        """Bubbles within this scenario."""
         return self._bubbles
 
-    def mission(self, agent_id):
+    def mission(self, agent_id) -> Optional[NavigationMission]:
+        """Get the mission assigned to the given agent."""
         return self._missions.get(agent_id, None)
 
     def _resolve_log_dir(self, log_dir):
@@ -784,28 +1092,21 @@ class Scenario:
 
         return os.path.abspath(log_dir)
 
-    def _validate_assets_exist(self):
-        assert Scenario.is_valid_scenario(self._root)
-
-        os.makedirs(self._log_dir, exist_ok=True)
+    @property
+    def traffic_history(self) -> Optional[TrafficHistory]:
+        """Traffic history contained within this scenario."""
+        return self._traffic_history
 
     @property
-    def scenario_hash(self):
+    def scenario_hash(self) -> str:
+        """A hash of the scenario."""
         return self._scenario_hash
 
     @property
-    def map_bounding_box(self):
-        # This function returns the following tuple:
-        # (bbox length, bbox width, bbox center)
-        net_file = os.path.join(self._root, "map.net.xml")
-        road_network = SumoRoadNetwork.from_file(net_file)
-        # 2D bbox in format (xmin, ymin, xmax, ymax)
-        bounding_box = road_network.graph.getBoundary()
-        bounding_box_length = bounding_box[2] - bounding_box[0]
-        bounding_box_width = bounding_box[3] - bounding_box[1]
-        bounding_box_center = [
-            (bounding_box[0] + bounding_box[2]) / 2,
-            (bounding_box[1] + bounding_box[3]) / 2,
-            0,
-        ]
-        return (bounding_box_length, bounding_box_width, bounding_box_center)
+    def metadata(self) -> Dict:
+        """Scenario metadata values.
+
+        Returns:
+            Dict: The values.
+        """
+        return self._metadata or {}

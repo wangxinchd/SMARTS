@@ -12,27 +12,23 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-import time
-import sys
-import multiprocessing
-import subprocess
+
+from multiprocessing.pool import ThreadPool
 from pathlib import Path
-from threading import Thread
-import importlib.resources as pkg_resources
+from typing import List, Sequence
 
 import click
-import sh
-
-from envision.client import Client as Envision
-from smarts.sstudio.sumo2mesh import generate_glb_from_sumo_network
 
 
-@click.group(name="scenario")
+@click.group(
+    name="scenario",
+    help="Generate, replay or clean scenarios. See `scl scenario COMMAND --help` for further options.",
+)
 def scenario_cli():
     pass
 
@@ -44,61 +40,24 @@ def scenario_cli():
     default=False,
     help="Clean previously generated artifacts first",
 )
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    help="Set the base seed of the scenario.",
+)
 @click.argument("scenario", type=click.Path(exists=True), metavar="<scenario>")
-def build_scenario(clean, scenario):
-    _build_single_scenario(clean, scenario)
+def build(clean: bool, scenario: str, seed: int):
+    from smarts.sstudio.scenario_construction import build_scenario
 
+    assert seed == None or isinstance(seed, (int))
 
-def _build_single_scenario(clean, scenario):
-    click.echo(f"build-scenario {scenario}")
-    if clean:
-        _clean(scenario)
-
-    scenario_root = Path(scenario)
-    map_net = scenario_root / "map.net.xml"
-    map_glb = scenario_root / "map.glb"
-    generate_glb_from_sumo_network(str(map_net), str(map_glb))
-
-    requirements_txt = scenario_root / "requirements.txt"
-    if requirements_txt.exists():
-        import zoo.policies
-
-        with pkg_resources.path(zoo.policies, "") as path:
-            # Serve policies through the static file server, then kill after
-            # we've installed scenario requirements
-            pip_index_proc = subprocess.Popen(
-                ["twistd", "-n", "web", "--path", path],
-                # Hide output to keep display simple
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-            )
-
-            pip_install_cmd = [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                str(requirements_txt),
-            ]
-
-            click.echo(
-                f"Installing scenario dependencies via '{' '.join(pip_install_cmd)}'"
-            )
-
-            try:
-                subprocess.check_call(pip_install_cmd, stdout=subprocess.DEVNULL)
-            finally:
-                pip_index_proc.terminate()
-                pip_index_proc.wait()
-
-    scenario_py = scenario_root / "scenario.py"
-    if scenario_py.exists():
-        subprocess.check_call([sys.executable, scenario_py])
+    build_scenario(scenario=scenario, clean=clean, seed=seed, log=click.echo)
 
 
 @scenario_cli.command(
-    name="build-all", help="Generate all scenarios under the given directories",
+    name="build-all",
+    help="Generate all scenarios under the given directories",
 )
 @click.option(
     "--clean",
@@ -106,59 +65,36 @@ def _build_single_scenario(clean, scenario):
     default=False,
     help="Clean previously generated artifacts first",
 )
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    help="Set the base seed of the scenarios.",
+)
 @click.argument("scenarios", nargs=-1, metavar="<scenarios>")
-def build_all_scenarios(clean, scenarios):
-    if not scenarios:
-        # nargs=-1 in combination with a default value is not supported
-        # if scenarios is not given, set /scenarios as default
-        scenarios = ["scenarios"]
-    builder_threads = {}
-    for scenarios_path in scenarios:
-        path = Path(scenarios_path)
-        for p in path.rglob("*.net.xml"):
-            scenario = f"{scenarios_path}/{p.parent.relative_to(scenarios_path)}"
-            builder_thread = Thread(
-                target=_build_single_scenario, args=(clean, scenario)
-            )
-            builder_thread.start()
-            builder_threads[p] = builder_thread
+def build_all(clean: bool, scenarios: List[str], seed: int):
+    from smarts.sstudio.scenario_construction import build_scenarios
 
-    for scenario_path, builder_thread in builder_threads.items():
-        click.echo(f"Waiting on {scenario_path} ...")
-        builder_thread.join()
+    build_scenarios(scenarios=scenarios, clean=clean, seed=seed, log=click.echo)
 
 
-@scenario_cli.command(name="clean")
+@scenario_cli.command(
+    name="clean", help="Remove previously generated scenario artifacts."
+)
 @click.argument("scenario", type=click.Path(exists=True), metavar="<scenario>")
-def clean_scenario(scenario):
-    _clean(scenario)
+def clean_scenario(scenario: str):
+    from smarts.sstudio.scenario_construction import clean_scenario
+
+    clean_scenario(scenario)
 
 
-def _clean(scenario):
-    to_be_removed = [
-        "map.glb",
-        "bubbles.pkl",
-        "missions.pkl",
-        "flamegraph-perf.log",
-        "flamegraph.svg",
-        "flamegraph.html",
-        "*.rou.xml",
-        "*.rou.alt.xml",
-        "social_agents/*",
-        "traffic/*",
-    ]
-    p = Path(scenario)
-    for file_name in to_be_removed:
-        for f in p.glob(file_name):
-            # Remove file
-            f.unlink()
-
-
-@scenario_cli.command(name="replay")
+@scenario_cli.command(name="replay", help="Play saved Envision data files in Envision.")
 @click.option("-d", "--directory", multiple=True)
 @click.option("-t", "--timestep", default=0.01, help="Timestep in seconds")
 @click.option("--endpoint", default="ws://localhost:8081")
-def replay(directory, timestep, endpoint):
+def replay(directory: Sequence[str], timestep: float, endpoint: str):
+    from envision.client import Client as Envision
+
     for path in directory:
         jsonl_paths = list(Path(path).glob("*.jsonl"))
         click.echo(
@@ -166,14 +102,14 @@ def replay(directory, timestep, endpoint):
             f"timestep={timestep}s"
         )
 
-        with multiprocessing.pool.ThreadPool(len(jsonl_paths)) as pool:
+        with ThreadPool(len(jsonl_paths)) as pool:
             pool.starmap(
                 Envision.read_and_send,
                 [(jsonl, endpoint, timestep) for jsonl in jsonl_paths],
             )
 
 
-scenario_cli.add_command(build_scenario)
-scenario_cli.add_command(build_all_scenarios)
+scenario_cli.add_command(build)
+scenario_cli.add_command(build_all)
 scenario_cli.add_command(clean_scenario)
 scenario_cli.add_command(replay)

@@ -2,24 +2,55 @@
 test: build-all-scenarios
 	# sstudio uses hash(...) as part of some of its type IDs. To make the tests
 	# repeatable we fix the seed.
-	PYTHONHASHSEED=42 pytest -v \
+	PYTHONPATH=$(PWD) PYTHONHASHSEED=42 pytest -v \
 		--cov=smarts \
 		--doctest-modules \
 		--forked \
 		--dist=loadscope \
-		-n `nproc --ignore 1` \
-		./tests ./smarts/core ./smarts/env ./smarts/contrib ./smarts/sstudio ./envision \
-		--ignore=./smarts/env/tests/test_learning.py \
+		--durations=0 \
+		-n `expr \( \`nproc\` \/ 2 \& \`nproc\` \> 3 \) \| 2` \
+		--nb-exec-timeout 65536 \
+		./examples/tests ./smarts/env ./envision ./smarts/core ./smarts/sstudio \
+		--ignore=./smarts/core/waymo_map.py \
+		--ignore=./smarts/core/argoverse_map.py \
+		--ignore=./smarts/core/tests/test_argoverse.py \
 		--ignore=./smarts/core/tests/test_smarts_memory_growth.py \
-		--ignore=./smarts/env/tests/test_benchmark.py
+		--ignore=./smarts/core/tests/test_env_frame_rate.py \
+		--ignore=./smarts/core/tests/test_notebook.py \
+		--ignore=./smarts/env/tests/test_benchmark.py \
+		--ignore=./examples/tests/test_learning.py \
+		--ignore=./examples/tests/test_rl.py \
+		-k 'not test_long_determinism'
+	rm -f .coverage.*
+	rm -f .coverage*
 
-.PHONY: benchmark
-benchmark: build-all-scenarios
-	pytest -v ./smarts/env/tests/test_benchmark.py
+.PHONY: sanity-test
+sanity-test: build-sanity-scenarios
+	PYTHONPATH=$(PWD) PYTHONHASHSEED=42 pytest -v \
+		--doctest-modules \
+		--forked \
+		--dist=loadscope \
+		--junitxml="sanity_test_result.xml" \
+		-n `expr \( \`nproc\` \/ 2 \& \`nproc\` \> 3 \) \| 2` \
+		./smarts/core/tests/test_python_version.py::test_python_version \
+		./smarts/core/tests/test_sumo_version.py::test_sumo_version \
+		./smarts/core/tests/test_dynamics_backend.py::test_set_pose \
+		./smarts/core/tests/test_sensors.py::test_waypoints_sensor \
+		./smarts/core/tests/test_smarts.py::test_smarts_doesnt_leak_tasks_after_reset \
+		./examples/tests/test_examples.py::test_examples[e2_single_agent] \
+		./smarts/env/tests/test_social_agent.py::test_social_agents_not_in_env_obs_keys
 
 .PHONY: test-learning
 test-learning: build-all-scenarios
-	pytest -v -s -o log_cli=1 -o log_cli_level=INFO ./smarts/env/tests/test_learning.py
+	pytest -v -s -o log_cli=1 -o log_cli_level=INFO ./examples/tests/test_learning.py
+
+.PHONY: test-long-determinism
+test-long-determinism:
+	scl scenario build --clean scenarios/sumo/minicity
+	PYTHONHASHSEED=42 pytest -v \
+		--forked \
+		--durations=0 \
+		./smarts/env/tests/test_determinism.py::test_long_determinism
 
 .PHONY: test-memory-growth
 test-memory-growth: build-all-scenarios
@@ -29,6 +60,12 @@ test-memory-growth: build-all-scenarios
 		--dist=loadscope \
 		-n `nproc --ignore 1` \
 		./smarts/core/tests/test_smarts_memory_growth.py
+	rm -f .coverage.*
+	rm -f .coverage*
+
+.PHONY: benchmark
+benchmark: build-all-scenarios
+	pytest -v --durations=0 ./smarts/env/tests/test_benchmark.py
 
 .PHONY: test-zoo
 test-zoo: build-all-scenarios
@@ -41,6 +78,15 @@ run: build-scenario
 .PHONY: build-all-scenarios
 build-all-scenarios:
 	scl scenario build-all scenarios
+
+.PHONY: build-sumo-scenarios
+build-sumo-scenarios:
+	scl scenario build-all scenarios/sumo
+
+.PHONY: build-sanity-scenarios
+build-sanity-scenarios:
+	scl scenario build --clean scenarios/sumo/loop
+	scl scenario build --clean scenarios/sumo/zoo_intersection
 
 .PHONY: build-scenario
 build-scenario:
@@ -59,23 +105,25 @@ flamegraph: $(scenario)/flamegraph.svg
 
 .PHONY: $(scenario)/flamegraph.svg
 $(scenario)/flamegraph.svg: $(scenario)/flamegraph-perf.log
-	./third_party/tools/flamegraph.pl --title "HiWay CPU ($(scenario))" $(scenario)/flamegraph-perf.log > $(scenario)/flamegraph.svg
+	./utils/third_party/tools/flamegraph.pl --title "HiWay CPU ($(scenario))" $(scenario)/flamegraph-perf.log > $(scenario)/flamegraph.svg
 
 .PHONY: $(scenario)/flamegraph-perf.log
 $(scenario)/flamegraph-perf.log: build-scenario $(script) smarts/core/* smarts/env/*
 	# pip install git+https://github.com/asokoloski/python-flamegraph.git
 	python -m flamegraph -i 0.001 -o $(scenario)/flamegraph-perf.log $(script) $(scenario)
 
-.PHONY: pview
-pview: $(scenario)/map.egg
-	# !!! READ THE pview MANUAL !!!
-	# https://www.panda3d.org/manual/?title=Previewing_3D_Models_in_Pview
-	pview -c -l $(scenario)/map.egg
-
 .PHONY: sumo-gui
 sumo-gui: $(scenario)/map.net.xml
 	sumo-gui \
 		-n ./$(scenario)/map.net.xml
+
+.PHONY: header-test
+header-test:
+	bash ./bin/header_test.sh
+
+.PHONY: gen-header
+gen-header:
+	bash ./bin/gen_header.sh
 
 .PHONY: clean
 clean:
@@ -90,12 +138,17 @@ clean:
 	rm -f ./$(scenario)/flamegraph.html
 	rm -f ./$(scenario)/*.rou.xml
 	rm -f ./$(scenario)/*.rou.alt.xml
+	rm -f ./$(scenario)/*.smarts.xml
 	rm -rf ./$(scenario)/traffic
 	rm -rf ./$(scenario)/social_agents
+	rm -f .coverage.*
+	rm -f .coverage*
 
 .PHONY: format
-format:
-	# pip install black==19.10b0
+format: gen-header
+	echo "isort, version `isort --version-number`"
+	isort -m VERTICAL_HANGING_INDENT --skip-gitignore --ac --tc --profile black ./cli ./envision ./examples/ ./utils/ ./scenarios/ ./smarts ./zoo
+	black --version
 	black .
 	# npm install prettier
 	# Make sure to install Node.js 14.x before running `prettier`
@@ -103,7 +156,7 @@ format:
 
 .PHONY: docs
 docs:
-	(cd docs; make clean html)
+	cd docs && make clean html SPHINXOPTS="-W -T -n --keep-going -b spelling -b linkcheck"
 
 .PHONY: wheel
 wheel: docs
@@ -116,3 +169,9 @@ wheel: docs
 .PHONY: rm-pycache
 rm-pycache:
 	find . -type f -name '*.py[co]' -delete -o -type d -name __pycache__ -delete
+
+.PHONY: rm-cov
+rm-cov:
+	find . -type f -name ".coverage.*" -delete
+	find . -type f -name ".coverage*" -delete
+

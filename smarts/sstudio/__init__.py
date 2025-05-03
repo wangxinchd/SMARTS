@@ -12,17 +12,30 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
-from .genscenario import (
-    gen_traffic,
-    gen_missions,
-    gen_social_agent_missions,
-    gen_group_laps,
-    gen_bubbles,
-    gen_friction_map,
-    gen_scenario,
-)
+
+import os
+import sys
+
+from .genscenario import gen_scenario
+
+# PYTHONHASHSEED must be "random", unset (default `None`), or an integer in range [0; 4294967295]
+_hashseed = os.getenv("PYTHONHASHSEED")
+if _hashseed is None:
+    _hashseed = 42
+    # We replace the seed if it does not exist to make subprocesses predictable
+    os.environ["PYTHONHASHSEED"] = f"{_hashseed}"
+elif _hashseed == "random":
+    import logging
+
+    logging.warning(
+        "PYTHONHASHSEED is 'random'. Simulation and generation may be unpredictable."
+    )
+
+from . import sstypes as types
+
+sys.modules[f"{__name__}.{types=}".partition("=")[0]] = types

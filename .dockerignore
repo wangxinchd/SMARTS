@@ -7,9 +7,10 @@
 **/.coverage.*
 **/coverage.xml
 **/develop-eggs/
-**/downloads/
+**/.dockerignore
 **/docs/_build/
 **/docs/api
+**/downloads/
 **/.DS_Store
 **/eggs/
 **/.eggs/
@@ -33,14 +34,17 @@
 **/.mypy_cache/
 **/nosetests.xml
 **/OpEn_build/
+**/.panda3d_cache
 **/pip-delete-this-directory.txt
 **/pip-log.txt
 **/pip-wheel-metadata/
 **/__pycache__
 **/.pytest_cache
 **/.python-version
+**/.pytype
 **/*.rou.alt.xml
 **/*.rou.xml
+**/*.sif
 **/*.so
 **/social_agents/*
 **/*.spec
@@ -48,15 +52,18 @@
 **/.spyproject
 **/supervisord.log
 **/supervisord.pid
+**/*.tar
 **/.tox/
 **/traffic_histories.pkl
 **/*.trips.xml
-**/.venv
+**/.venv*
 **/.vscode
 **/wheels/
 **/xdummy.log
 
 # Keep manually generated sumo route files
 !zoo/evaluation/scenarios/**/traffic/*.rou.xml
+!smarts/sstudio/tests/*.rou.xml
+
 # Keep model assets
 !**/models/*.glb

@@ -12,7 +12,7 @@
 #
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -20,12 +20,14 @@
 import argparse
 
 from smarts.core.sumo_road_network import SumoRoadNetwork
+from smarts.sstudio.sstypes import MapSpec
 
 
-def generate_glb_from_sumo_network(sumo_net_file, out_glb_file):
-    road_network = SumoRoadNetwork.from_file(net_file=sumo_net_file)
-    glb = road_network.build_glb()
-    glb.write_glb(out_glb_file)
+def generate_glb_from_sumo_file(sumo_net_file: str, out_glb_dir: str):
+    """Creates a geometry file from a sumo map file."""
+    map_spec = MapSpec(sumo_net_file)
+    road_network = SumoRoadNetwork.from_spec(map_spec)
+    road_network.to_glb(out_glb_dir)
 
 
 if __name__ == "__main__":
@@ -37,4 +39,4 @@ if __name__ == "__main__":
     parser.add_argument("output_path", help="where to write the mesh file", type=str)
     args = parser.parse_args()
 
-    generate_glb_from_sumo_network(args.net, args.output_path)
+    generate_glb_from_sumo_file(args.net, args.output_path)

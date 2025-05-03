@@ -2,9 +2,6 @@ import json
 import os
 
 import numpy as np
-import xlwt
-import xlrd
-from xlutils import copy
 from numpy.linalg import det
 from scipy.signal import savgol_filter
 

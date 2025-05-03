@@ -1,7 +1,28 @@
+# MIT License
+#
+# Copyright (C) 2021. Huawei Technologies Co., Ltd. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
 import pytest
 
-import smarts.sstudio.types as t
-from smarts.core.agent import AgentSpec, Agent
+import smarts.sstudio.sstypes as t
+from smarts.core.agent import Agent
 from smarts.core.agent_interface import AgentInterface, AgentType
 from smarts.core.controllers import LaneFollowingController
 from smarts.core.scenario import Scenario
@@ -9,6 +30,7 @@ from smarts.core.smarts import SMARTS
 from smarts.core.sumo_traffic_simulation import SumoTrafficSimulation
 from smarts.core.tests.helpers.scenario import temp_scenario
 from smarts.sstudio import gen_scenario
+from smarts.zoo.agent_spec import AgentSpec
 
 AGENT_ID = "Agent-007"
 
@@ -47,7 +69,8 @@ def scenarios(request):
             route=t.Route(begin=("edge-west-WE", 0, 10), end=(request.param[1], 0, 40))
         )
         gen_scenario(
-            t.Scenario(ego_missions=[mission]), output_dir=scenario_root,
+            t.Scenario(ego_missions=[mission]),
+            output_dir=scenario_root,
         )
         yield Scenario.variations_for_all_scenario_roots(
             [str(scenario_root)], [AGENT_ID]
@@ -68,7 +91,7 @@ def agent_spec(agent_and_agent_type):
 def smarts(agent_spec):
     smarts = SMARTS(
         agent_interfaces={AGENT_ID: agent_spec.interface},
-        traffic_sim=SumoTrafficSimulation(),
+        traffic_sims=[SumoTrafficSimulation()],
     )
     yield smarts
     smarts.destroy()
@@ -90,7 +113,6 @@ def test_lane_following_controller(smarts, agent_spec, scenarios):
     agent_obs = None
     for _ in range(500):
         agent_obs = observations[AGENT_ID]
-        agent_obs = agent_spec.observation_adapter(agent_obs)
 
         if agent_obs.ego_vehicle_state.speed > 5 / 3.6:
             detected = 1
@@ -109,8 +131,8 @@ def test_lane_following_controller(smarts, agent_spec, scenarios):
             )
         )
 
-        agent_action = agent_spec.action_adapter(agent.act(agent_obs))
-        observations, _, dones, _ = smarts.step({AGENT_ID: agent_action})
+        agent_action = agent.act(agent_obs)
+        observations, _, _, _ = smarts.step({AGENT_ID: agent_action})
 
         if agent_obs.events.reached_goal:
             break

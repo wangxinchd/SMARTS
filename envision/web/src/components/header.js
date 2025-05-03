@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -24,16 +24,22 @@ import { LoadingOutlined } from "@ant-design/icons";
 const { Option, OptGroup } = Select;
 const { Header } = Layout;
 
+export const PLAYMODES = Object.freeze({
+  uncapped: "uncapped",
+  near_real_time: "near_real_time",
+});
+
 export default function Header_({
   simulationIds,
   matchedSimulationId,
   onStartRecording,
   onStopRecording,
-  onToggleShowScores,
+  onToggleShowControls,
   onToggleEgoView,
   onSelectSimulation,
+  onSelectPlayingMode,
 }) {
-  const [showScores, setShowScores] = useState(true);
+  const [showControl, setShowControl] = useState(true);
   const [egoView, setEgoView] = useState(false);
   const [recording, setRecording] = useState(false);
 
@@ -48,10 +54,10 @@ export default function Header_({
     setRecording(recording_);
   }
 
-  function toggleShowScores() {
-    let showScores_ = !showScores;
-    onToggleShowScores(showScores_);
-    setShowScores(showScores_);
+  function toggleShowControls() {
+    let showControl_ = !showControl;
+    onToggleShowControls(showControl_);
+    setShowControl(showControl_);
   }
 
   function toggleEgoView() {
@@ -89,16 +95,24 @@ export default function Header_({
       <Space>
         <Select
           value={selectValue}
-          style={{ width: 400 }}
+          style={{ width: 300 }}
           onChange={(value) => onSelectSimulation(value)}
         >
-          <Option value="all">All Simulations</Option>
+          <Option value="all">All Simulations (click to maximize)</Option>
           <OptGroup label="Simulations">
             {simulationIds.map((id) => (
               <Option key={id} value={id}>{`Sim ${displaySimName(id)}`}</Option>
             ))}
           </OptGroup>
         </Select>
+
+        <Button
+          type="primary"
+          ghost
+          onClick={(value) => onSelectSimulation((value = "all"))}
+        >
+          All Simulations
+        </Button>
 
         <Switch>
           <Route exact={true} path="/all"></Route>
@@ -116,8 +130,15 @@ export default function Header_({
       </Space>
 
       <Space style={{ float: "right" }}>
-        <Checkbox defaultChecked onClick={toggleShowScores}>
-          Show Scores
+        <Select
+          defaultValue={PLAYMODES.near_real_time}
+          onChange={(mode) => onSelectPlayingMode(mode)}
+        >
+          <Option value={PLAYMODES.near_real_time}>Near Realtime Mode</Option>
+          <Option value={PLAYMODES.uncapped}>Uncapped Mode</Option>
+        </Select>
+        <Checkbox defaultChecked onClick={toggleShowControls}>
+          Show Controls
         </Checkbox>
         <Checkbox onClick={toggleEgoView}>Egocentric View</Checkbox>
       </Space>

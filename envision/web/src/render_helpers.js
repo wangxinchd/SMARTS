@@ -12,7 +12,7 @@
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
 // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
@@ -26,6 +26,7 @@ import {
 } from "@babylonjs/core";
 
 import { VehicleTypes, ActorTypes } from "./enums.js";
+import { SceneColors } from "./helpers/scene_colors.js";
 
 export function vehicleMeshFilename(actorType, vehicleType) {
   if (vehicleType == VehicleTypes.BUS) {
@@ -44,6 +45,14 @@ export function vehicleMeshFilename(actorType, vehicleType) {
     return "trailer.glb";
   }
 
+  if (vehicleType == VehicleTypes.PEDESTRIAN) {
+    return "pedestrian.glb";
+  }
+
+  if (vehicleType == VehicleTypes.MOTORCYCLE) {
+    return "motorcycle.glb";
+  }
+
   if (vehicleType == VehicleTypes.CAR) {
     if (actorType == ActorTypes.SOCIAL_AGENT) {
       return "muscle_car_social_agent.glb";
@@ -55,13 +64,13 @@ export function vehicleMeshFilename(actorType, vehicleType) {
   return "simple_car.glb";
 }
 
-export function vehicleMeshColor(actorType, scene_colors) {
+export function vehicleMeshColor(actorType) {
   if (actorType == ActorTypes.SOCIAL_AGENT) {
-    return scene_colors["social_agent"];
+    return SceneColors.SocialAgent;
   } else if (actorType == ActorTypes.AGENT) {
-    return scene_colors["agent"];
+    return SceneColors.Agent;
   } else {
-    return scene_colors["social_vehicle"];
+    return SceneColors.SocialVehicle;
   }
 }
 
@@ -72,7 +81,7 @@ export function buildLabel(name, text, scene) {
     name,
     { width: width, height: height },
     scene,
-    false
+    false,
   );
   plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
 
@@ -80,7 +89,7 @@ export function buildLabel(name, text, scene) {
     `${name}-texture`,
     { width: width * 100, height: height * 100 },
     scene,
-    true
+    true,
   );
   texture.hasAlpha = true;
   texture.drawText(text, null, null, "bold 100px arial", "white");
